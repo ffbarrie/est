@@ -1,0 +1,5 @@
+.git
+.metadata
+.claude
+*.md
+config.example.json
