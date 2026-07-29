@@ -173,6 +173,32 @@ func TestHandleCACerts_NoClientCertRequired(t *testing.T) {
 	}
 }
 
+// TestMTLS_UntrustedClientCertRejected proves the core mTLS security
+// property that every other test only exercises indirectly: a client
+// certificate signed by a CA the server does NOT trust must be rejected
+// at the TLS handshake, not merely treated as "no certificate presented".
+// This differs from TestHandleSimpleEnroll_RequiresClientCert (no cert at
+// all, handshake succeeds, handler returns 401) — here the handshake
+// itself must fail, for every endpoint, including ones that don't
+// otherwise require a client certificate.
+func TestMTLS_UntrustedClientCertRejected(t *testing.T) {
+	tc := newTestCA(t)
+	ts := newTestServer(t, tc, nil)
+
+	untrustedCA := newTestCA(t) // independent root, not in the server's ClientCAs pool
+	leafCert, leafKey := untrustedCA.issueLeaf(t, "impostor.example.test")
+	client := clientFor(t, ts, leafCert, leafKey)
+
+	// /cacerts doesn't itself require a client certificate, but presenting
+	// an untrusted one must still fail the handshake before any HTTP
+	// routing happens (tls.VerifyClientCertIfGiven verifies whatever is
+	// presented, unconditionally).
+	_, err := client.Get(ts.URL + "/.well-known/est/cacerts")
+	if err == nil {
+		t.Fatal("expected TLS handshake to fail for a client cert signed by an untrusted CA, got nil error")
+	}
+}
+
 func TestHandleSimpleEnroll_RequiresClientCert(t *testing.T) {
 	tc := newTestCA(t)
 	ts := newTestServer(t, tc, nil)

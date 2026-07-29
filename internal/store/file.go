@@ -80,10 +80,13 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
+// PutCSR implements Store, writing csrDER to <dir>/csrs/<serial-hex>.der.
 func (s *FileStore) PutCSR(ctx context.Context, serial *big.Int, csrDER []byte, meta Metadata) error {
 	return writeFileAtomic(s.csrPath(serial), csrDER, 0o640)
 }
 
+// PutCertificate implements Store, writing certDER and meta to
+// <dir>/certs/<serial-hex>.der and .json respectively.
 func (s *FileStore) PutCertificate(ctx context.Context, serial *big.Int, certDER []byte, meta Metadata) error {
 	if err := writeFileAtomic(s.certPath(serial), certDER, 0o640); err != nil {
 		return err
@@ -95,6 +98,8 @@ func (s *FileStore) PutCertificate(ctx context.Context, serial *big.Int, certDER
 	return writeFileAtomic(s.certMetaPath(serial), metaJSON, 0o640)
 }
 
+// GetCertificate implements Store, reading back a certificate previously
+// written by PutCertificate.
 func (s *FileStore) GetCertificate(ctx context.Context, serial *big.Int) (*x509.Certificate, error) {
 	der, err := os.ReadFile(s.certPath(serial))
 	if err != nil {

@@ -1,0 +1,39 @@
+{
+  "listen_addr": "0.0.0.0:8443",
+  "server_cert_file": "/etc/est/server.crt",
+  "server_key_file": "/etc/est/server.key",
+  "client_ca_files": ["/etc/est/ca.crt"],
+  "ca_cert_file": "/etc/est/ca.crt",
+  "ca_key_file": "/etc/est/ca.key",
+  "store_dir": "/var/lib/estd",
+  "cert_validity": "8760h",
+
+  "csr_attrs": {
+    "challenge_password": false,
+    "key_algorithm": {
+      "oid": "1.2.840.10045.2.1",
+      "curve_oid": "1.3.132.0.34"
+    },
+    "required_extensions": [
+      {
+        "oid": "2.5.29.17",
+        "critical": true,
+        "value_hex": "3009820777772e636f6d"
+      }
+    ],
+    "extra_oids": ["1.2.840.10045.4.3.3"],
+    "template": {
+      "subject": [
+        {"oid": "2.5.4.3"},
+        {"oid": "2.5.4.11", "value": "myDept"}
+      ],
+      "key_type": {
+        "oid": "1.2.840.10045.2.1",
+        "curve_oid": "1.2.840.10045.3.1.7"
+      },
+      "extensions": [
+        {"oid": "2.5.29.17"}
+      ]
+    }
+  }
+}
