@@ -65,6 +65,42 @@ field reference below.
 `value_hex` fields throughout `csr_attrs` are raw, hex-encoded DER bytes — the server has no notion of what's inside
 an extension's value; it just places the bytes you give it.
 
+## Running via Docker
+
+Images are built from the [Dockerfile](Dockerfile) (multi-stage, `CGO_ENABLED=0`, a distroless
+`nonroot` final image — no shell, no package manager, runs as uid/gid `65532`) and published to
+`ghcr.io/ffbarrie/est` on every merge to `develop` (tag `develop`) and `main` (tags `latest` and `main`), always
+alongside a `sha-<short-commit>` tag.
+
+```bash
+docker pull ghcr.io/ffbarrie/est:develop
+# or build locally:
+docker build -t estd:dev .
+```
+
+The image expects config and certs mounted **read-only** at `/etc/estd/` (matching `config.example.json`'s layout)
+and `store_dir` mounted **read-write** at `/var/lib/estd/`. Since the image runs as a fixed non-root uid, the host
+directory backing the read-write mount needs to be writable by uid `65532` before the first run:
+
+```bash
+mkdir -p ./data && chown 65532:65532 ./data   # or: chmod a+rwX ./data for a quick local test
+```
+
+For a quick local try with throwaway dev certs, [scripts/gen-dev-certs.sh](scripts/gen-dev-certs.sh) generates a
+test CA, server cert, and client cert (the same recipe used to verify every change to this server), plus a matching
+`config.json`:
+
+```bash
+scripts/gen-dev-certs.sh ./.devcerts
+docker run --rm -p 8443:8443 \
+  -v "$(pwd)/.devcerts:/etc/estd:ro" \
+  -v "$(pwd)/.devcerts/data:/var/lib/estd:rw" \
+  ghcr.io/ffbarrie/est:develop
+
+# from another terminal:
+curl --cacert ./.devcerts/server.crt https://localhost:8443/.well-known/est/cacerts
+```
+
 ## Architecture
 
 See [AGENTS.md](AGENTS.md) for the package layout, extension points (`CABackend`, `Store`), and the conventions this
