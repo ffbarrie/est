@@ -1,0 +1,92 @@
+// Command estd runs an EST (RFC 7030) server backed by a local,
+// crypto/x509-based CA.
+package main
+
+import (
+	"context"
+	"flag"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/ffbarrie/est/internal/ca"
+	"github.com/ffbarrie/est/internal/config"
+	"github.com/ffbarrie/est/internal/estapi"
+	"github.com/ffbarrie/est/internal/store"
+)
+
+func main() {
+	configPath := flag.String("config", "", "path to JSON config file")
+	flag.Parse()
+
+	if *configPath == "" {
+		slog.Error("missing required -config flag")
+		os.Exit(1)
+	}
+
+	if err := run(*configPath); err != nil {
+		slog.Error("estd exiting", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run(configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
+	caCert, caKey, err := ca.LoadCAKeyPair(cfg.CACertFile, cfg.CAKeyFile)
+	if err != nil {
+		return err
+	}
+	localCA := ca.NewLocalCA(caCert, caKey, ca.RandomSerialSource{}, time.Duration(cfg.CertValidity))
+
+	fileStore, err := store.NewFileStore(cfg.StoreDir)
+	if err != nil {
+		return err
+	}
+
+	tlsConfig, err := estapi.BuildTLSConfig(cfg.ServerCertFile, cfg.ServerKeyFile, cfg.ClientCAFiles)
+	if err != nil {
+		return err
+	}
+
+	srv := estapi.NewServer(localCA, fileStore)
+
+	httpServer := &http.Server{
+		Addr:      cfg.ListenAddr,
+		Handler:   srv.Handler(),
+		TLSConfig: tlsConfig,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		slog.Info("estd listening", "addr", cfg.ListenAddr)
+		errCh <- httpServer.ListenAndServeTLS("", "")
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil && err != http.ErrServerClosed {
+			return err
+		}
+	case <-ctx.Done():
+		slog.Info("estd shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
