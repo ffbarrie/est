@@ -38,6 +38,91 @@ func TestLoad_ValidConfig(t *testing.T) {
 	}
 }
 
+func TestLoad_CSRAttrs(t *testing.T) {
+	c, err := Load(writeConfig(t, t.TempDir(), "config.json", `{
+		"listen_addr": ":8443",
+		"server_cert_file": "server.crt",
+		"server_key_file": "server.key",
+		"client_ca_files": ["ca.crt"],
+		"ca_cert_file": "ca.crt",
+		"ca_key_file": "ca.key",
+		"store_dir": "./data",
+		"cert_validity": "8760h",
+		"csr_attrs": {
+			"challenge_password": true,
+			"key_algorithm": {"oid": "1.2.840.10045.2.1", "curve_oid": "1.3.132.0.34"},
+			"required_extensions": [
+				{"oid": "2.5.29.17", "critical": true, "value_hex": "3009820777772e636f6d"}
+			],
+			"extra_oids": ["1.2.840.10045.4.3.3"],
+			"template": {
+				"subject": [
+					{"oid": "2.5.4.3"},
+					{"oid": "2.5.4.11", "value": "myDept"}
+				],
+				"key_type": {"oid": "1.2.840.10045.2.1", "curve_oid": "1.2.840.10045.3.1.7"},
+				"extensions": [
+					{"oid": "2.5.29.17"},
+					{"oid": "2.5.29.15", "critical": true, "value_hex": "0500"}
+				]
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.CSRAttrs == nil {
+		t.Fatal("CSRAttrs is nil")
+	}
+	if !c.CSRAttrs.ChallengePassword {
+		t.Error("ChallengePassword = false, want true")
+	}
+	if c.CSRAttrs.KeyAlgorithm == nil || c.CSRAttrs.KeyAlgorithm.CurveOID != "1.3.132.0.34" {
+		t.Errorf("KeyAlgorithm = %+v", c.CSRAttrs.KeyAlgorithm)
+	}
+	if len(c.CSRAttrs.RequiredExtensions) != 1 || c.CSRAttrs.RequiredExtensions[0].OID != "2.5.29.17" {
+		t.Errorf("RequiredExtensions = %+v", c.CSRAttrs.RequiredExtensions)
+	}
+	if len(c.CSRAttrs.ExtraOIDs) != 1 || c.CSRAttrs.ExtraOIDs[0] != "1.2.840.10045.4.3.3" {
+		t.Errorf("ExtraOIDs = %+v", c.CSRAttrs.ExtraOIDs)
+	}
+	tmpl := c.CSRAttrs.Template
+	if tmpl == nil {
+		t.Fatal("Template is nil")
+	}
+	if len(tmpl.Subject) != 2 {
+		t.Fatalf("Template.Subject has %d entries, want 2", len(tmpl.Subject))
+	}
+	if tmpl.Subject[0].Value != nil {
+		t.Errorf("Subject[0].Value = %v, want nil", *tmpl.Subject[0].Value)
+	}
+	if tmpl.Subject[1].Value == nil || *tmpl.Subject[1].Value != "myDept" {
+		t.Errorf("Subject[1].Value = %v, want \"myDept\"", tmpl.Subject[1].Value)
+	}
+	if len(tmpl.Extensions) != 2 {
+		t.Fatalf("Template.Extensions has %d entries, want 2", len(tmpl.Extensions))
+	}
+	if tmpl.Extensions[0].ValueHex != nil {
+		t.Errorf("Extensions[0].ValueHex = %v, want nil", *tmpl.Extensions[0].ValueHex)
+	}
+	if tmpl.Extensions[1].ValueHex == nil || *tmpl.Extensions[1].ValueHex != "0500" {
+		t.Errorf("Extensions[1].ValueHex = %v, want \"0500\"", tmpl.Extensions[1].ValueHex)
+	}
+}
+
+func TestLoad_CSRAttrsAbsent(t *testing.T) {
+	c, err := Load(writeConfig(t, t.TempDir(), "config.json", `{
+		"listen_addr": ":8443",
+		"cert_validity": "8760h"
+	}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.CSRAttrs != nil {
+		t.Errorf("CSRAttrs = %+v, want nil when absent from config", c.CSRAttrs)
+	}
+}
+
 func TestLoad_MissingFile(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "does-not-exist.json")); err == nil {
 		t.Error("Load: expected error for missing file, got nil")

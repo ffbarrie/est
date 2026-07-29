@@ -12,6 +12,7 @@ import (
 const (
 	contentTypePKCS10    = "application/pkcs10"
 	contentTypePKCS7Mime = "application/pkcs7-mime; smime-type=certs-only"
+	contentTypeCSRAttrs  = "application/csrattrs"
 
 	// maxCSRBodyBytes caps the base64-encoded request body EST clients may
 	// send to /simpleenroll and /simplereenroll.
@@ -61,15 +62,21 @@ func stripWhitespace(s string) string {
 	return b.String()
 }
 
-// writePKCS7Response writes der as a base64-encoded, MIME-wrapped
-// (76 chars/line, CRLF) application/pkcs7-mime response body, per RFC
-// 7030's certs-only response format. No Content-Transfer-Encoding header is
-// sent: RFC 8951 §3 retires that header from the spec text in favor of
-// plain base64 [RFC4648], and requires any value in it to be ignored.
+// writePKCS7Response writes der as a base64-encoded application/pkcs7-mime
+// response body, per RFC 7030's certs-only response format.
 func writePKCS7Response(w http.ResponseWriter, der []byte) {
+	writeBase64Response(w, contentTypePKCS7Mime, der)
+}
+
+// writeBase64Response writes der as a base64-encoded, MIME-wrapped
+// (76 chars/line, CRLF) response body with the given content-type. No
+// Content-Transfer-Encoding header is sent: RFC 8951 §3 retires that
+// header from the spec text in favor of plain base64 [RFC4648], and
+// requires any value in it to be ignored.
+func writeBase64Response(w http.ResponseWriter, contentType string, der []byte) {
 	encoded := base64.StdEncoding.EncodeToString(der)
 
-	w.Header().Set("Content-Type", contentTypePKCS7Mime)
+	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(http.StatusOK)
 
 	for i := 0; i < len(encoded); i += mimeLineLength {

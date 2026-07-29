@@ -41,6 +41,60 @@ type Config struct {
 	CAKeyFile      string   `json:"ca_key_file"`
 	StoreDir       string   `json:"store_dir"`
 	CertValidity   Duration `json:"cert_validity"`
+
+	// CSRAttrs configures the GET /csrattrs response. Nil means the server
+	// has no CSR attribute requirements to advertise (responds 204).
+	CSRAttrs *CSRAttrsConfig `json:"csr_attrs,omitempty"`
+}
+
+// CSRAttrsConfig is the plain-JSON shape of internal/csrattrs.Options — it
+// deliberately doesn't import that package (config stays a leaf dependency;
+// cmd/estd translates this into csrattrs.Options at startup).
+type CSRAttrsConfig struct {
+	ChallengePassword  bool                `json:"challenge_password"`
+	KeyAlgorithm       *KeyAlgorithmConfig `json:"key_algorithm,omitempty"`
+	RequiredExtensions []ExtensionConfig   `json:"required_extensions,omitempty"`
+	ExtraOIDs          []string            `json:"extra_oids,omitempty"`
+	Template           *TemplateConfig     `json:"template,omitempty"`
+}
+
+// KeyAlgorithmConfig requires a specific public key type. Set at most one
+// of CurveOID or RSAModulusBits.
+type KeyAlgorithmConfig struct {
+	OID            string `json:"oid"`
+	CurveOID       string `json:"curve_oid,omitempty"`
+	RSAModulusBits int    `json:"rsa_modulus_bits,omitempty"`
+}
+
+// ExtensionConfig is a fully specified X.509 extension requirement (every
+// value mandatory — used for the classic id-ExtensionReq attribute).
+type ExtensionConfig struct {
+	OID      string `json:"oid"`
+	Critical bool   `json:"critical,omitempty"`
+	ValueHex string `json:"value_hex"`
+}
+
+// TemplateConfig configures a CertificationRequestInfoTemplate attribute
+// (RFC 9908 §3.4).
+type TemplateConfig struct {
+	Subject    []RDNConfig               `json:"subject,omitempty"`
+	KeyType    *KeyAlgorithmConfig       `json:"key_type,omitempty"`
+	Extensions []TemplateExtensionConfig `json:"extensions,omitempty"`
+}
+
+// RDNConfig is one subject RDN in a Template. A null (absent) value means
+// the client fills it in; an explicit value (including "") dictates it.
+type RDNConfig struct {
+	OID   string  `json:"oid"`
+	Value *string `json:"value,omitempty"`
+}
+
+// TemplateExtensionConfig is an extension requirement inside a
+// TemplateConfig, whose value may be left null for the client to fill in.
+type TemplateExtensionConfig struct {
+	OID      string  `json:"oid"`
+	Critical bool    `json:"critical,omitempty"`
+	ValueHex *string `json:"value_hex,omitempty"`
 }
 
 // Load reads and parses a Config from a JSON file at path. It does not

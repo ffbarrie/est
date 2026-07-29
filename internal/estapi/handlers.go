@@ -116,3 +116,15 @@ func (s *Server) issueAndRespond(w http.ResponseWriter, r *http.Request, csr *x5
 
 	writePKCS7Response(w, der)
 }
+
+// handleCSRAttrs implements GET /.well-known/est/csrattrs. Per RFC 7030
+// §4.5, the server SHOULD NOT require client authentication for this
+// endpoint — no client-certificate check is performed here (the TLS layer
+// already permits anonymous connections via VerifyClientCertIfGiven).
+func (s *Server) handleCSRAttrs(w http.ResponseWriter, r *http.Request) {
+	if len(s.CSRAttrsDER) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeBase64Response(w, contentTypeCSRAttrs, s.CSRAttrsDER)
+}
