@@ -14,6 +14,7 @@ import (
 
 	"github.com/ffbarrie/est/internal/ca"
 	"github.com/ffbarrie/est/internal/config"
+	"github.com/ffbarrie/est/internal/csrattrs"
 	"github.com/ffbarrie/est/internal/estapi"
 	"github.com/ffbarrie/est/internal/store"
 )
@@ -58,7 +59,12 @@ func run(configPath string) error {
 		return err
 	}
 
-	srv := estapi.NewServer(localCA, fileStore)
+	csrAttrsDER, err := csrattrs.Encode(csrAttrsOptions(cfg.CSRAttrs))
+	if err != nil {
+		return err
+	}
+
+	srv := estapi.NewServer(localCA, fileStore, csrAttrsDER)
 
 	httpServer := &http.Server{
 		Addr:      cfg.ListenAddr,

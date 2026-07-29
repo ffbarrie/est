@@ -1,6 +1,7 @@
 package estapi
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ffbarrie/est/internal/ca"
+	"github.com/ffbarrie/est/internal/csrattrs"
 	"github.com/ffbarrie/est/internal/pkcs7"
 	"github.com/ffbarrie/est/internal/store"
 )
@@ -102,7 +104,7 @@ func csrDER(t *testing.T, cn string, dnsNames []string) []byte {
 // newTestServer starts an httptest.Server with real mTLS (VerifyClientCertIfGiven)
 // backed by a LocalCA rooted at tc, and returns it along with the file
 // store directory it uses.
-func newTestServer(t *testing.T, tc testCA) *httptest.Server {
+func newTestServer(t *testing.T, tc testCA, csrAttrsDER []byte) *httptest.Server {
 	t.Helper()
 
 	st, err := store.NewFileStore(t.TempDir())
@@ -110,7 +112,7 @@ func newTestServer(t *testing.T, tc testCA) *httptest.Server {
 		t.Fatalf("NewFileStore: %v", err)
 	}
 	localCA := ca.NewLocalCA(tc.cert, tc.key, ca.RandomSerialSource{}, time.Hour)
-	srv := NewServer(localCA, st)
+	srv := NewServer(localCA, st, csrAttrsDER)
 
 	ts := httptest.NewUnstartedServer(srv.Handler())
 
@@ -142,7 +144,7 @@ func clientFor(t *testing.T, ts *httptest.Server, leafCert *x509.Certificate, le
 
 func TestHandleCACerts_NoClientCertRequired(t *testing.T) {
 	tc := newTestCA(t)
-	ts := newTestServer(t, tc)
+	ts := newTestServer(t, tc, nil)
 	client := clientFor(t, ts, nil, nil)
 
 	resp, err := client.Get(ts.URL + "/.well-known/est/cacerts")
@@ -173,7 +175,7 @@ func TestHandleCACerts_NoClientCertRequired(t *testing.T) {
 
 func TestHandleSimpleEnroll_RequiresClientCert(t *testing.T) {
 	tc := newTestCA(t)
-	ts := newTestServer(t, tc)
+	ts := newTestServer(t, tc, nil)
 	client := clientFor(t, ts, nil, nil)
 
 	resp, err := client.Post(ts.URL+"/.well-known/est/simpleenroll", contentTypePKCS10,
@@ -189,7 +191,7 @@ func TestHandleSimpleEnroll_RequiresClientCert(t *testing.T) {
 
 func TestHandleSimpleEnroll_IssuesCertificate(t *testing.T) {
 	tc := newTestCA(t)
-	ts := newTestServer(t, tc)
+	ts := newTestServer(t, tc, nil)
 	leafCert, leafKey := tc.issueLeaf(t, "existing-client.example.test")
 	client := clientFor(t, ts, leafCert, leafKey)
 
@@ -220,7 +222,7 @@ func TestHandleSimpleEnroll_IssuesCertificate(t *testing.T) {
 
 func TestHandleSimpleReenroll_IdentityMismatchRejected(t *testing.T) {
 	tc := newTestCA(t)
-	ts := newTestServer(t, tc)
+	ts := newTestServer(t, tc, nil)
 	leafCert, leafKey := tc.issueLeaf(t, "client01.example.test")
 	client := clientFor(t, ts, leafCert, leafKey)
 
@@ -237,7 +239,7 @@ func TestHandleSimpleReenroll_IdentityMismatchRejected(t *testing.T) {
 
 func TestHandleSimpleReenroll_MatchingIdentityIssues(t *testing.T) {
 	tc := newTestCA(t)
-	ts := newTestServer(t, tc)
+	ts := newTestServer(t, tc, nil)
 	leafCert, leafKey := tc.issueLeaf(t, "client01.example.test")
 	client := clientFor(t, ts, leafCert, leafKey)
 
@@ -255,7 +257,7 @@ func TestHandleSimpleReenroll_MatchingIdentityIssues(t *testing.T) {
 
 func TestHandleSimpleEnroll_MalformedBody(t *testing.T) {
 	tc := newTestCA(t)
-	ts := newTestServer(t, tc)
+	ts := newTestServer(t, tc, nil)
 	leafCert, leafKey := tc.issueLeaf(t, "existing-client.example.test")
 	client := clientFor(t, ts, leafCert, leafKey)
 
@@ -266,6 +268,55 @@ func TestHandleSimpleEnroll_MalformedBody(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", resp.StatusCode)
 		}
+	}
+}
+
+func TestHandleCSRAttrs_NoneConfigured(t *testing.T) {
+	tc := newTestCA(t)
+	ts := newTestServer(t, tc, nil)
+	client := clientFor(t, ts, nil, nil)
+
+	resp, err := client.Get(ts.URL + "/.well-known/est/csrattrs")
+	if err != nil {
+		t.Fatalf("GET /csrattrs: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestHandleCSRAttrs_Configured(t *testing.T) {
+	tc := newTestCA(t)
+	der, err := csrattrs.Encode(csrattrs.Options{ChallengePassword: true})
+	if err != nil {
+		t.Fatalf("csrattrs.Encode: %v", err)
+	}
+	ts := newTestServer(t, tc, der)
+	client := clientFor(t, ts, nil, nil) // no client cert — RFC 7030 §4.5 SHOULD NOT require one
+
+	resp, err := client.Get(ts.URL + "/.well-known/est/csrattrs")
+	if err != nil {
+		t.Fatalf("GET /csrattrs: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != contentTypeCSRAttrs {
+		t.Errorf("Content-Type = %q, want %q", ct, contentTypeCSRAttrs)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	got, err := base64.StdEncoding.DecodeString(stripWhitespace(string(body)))
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	if !bytes.Equal(got, der) {
+		t.Errorf("body = %x, want %x", got, der)
 	}
 }
 

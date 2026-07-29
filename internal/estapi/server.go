@@ -13,20 +13,28 @@ import (
 type Server struct {
 	CA    ca.CABackend
 	Store store.Store
+
+	// CSRAttrsDER is the pre-encoded DER response for GET /csrattrs
+	// (computed once at startup, since the response is static and
+	// server-wide — see internal/csrattrs). Nil/empty means no CSR
+	// attribute requirements are configured; the handler responds 204.
+	CSRAttrsDER []byte
 }
 
-// NewServer constructs a Server.
-func NewServer(caBackend ca.CABackend, st store.Store) *Server {
-	return &Server{CA: caBackend, Store: st}
+// NewServer constructs a Server. csrAttrsDER is the pre-encoded /csrattrs
+// response body (nil if none is configured).
+func NewServer(caBackend ca.CABackend, st store.Store, csrAttrsDER []byte) *Server {
+	return &Server{CA: caBackend, Store: st, CSRAttrsDER: csrAttrsDER}
 }
 
-// Handler returns the http.Handler implementing the v1 EST endpoints:
-// GET /.well-known/est/cacerts, POST /.well-known/est/simpleenroll and
-// POST /.well-known/est/simplereenroll.
+// Handler returns the http.Handler implementing the EST endpoints:
+// GET /.well-known/est/cacerts, POST /.well-known/est/simpleenroll,
+// POST /.well-known/est/simplereenroll, and GET /.well-known/est/csrattrs.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/est/cacerts", s.handleCACerts)
 	mux.HandleFunc("POST /.well-known/est/simpleenroll", s.handleSimpleEnroll)
 	mux.HandleFunc("POST /.well-known/est/simplereenroll", s.handleSimpleReenroll)
+	mux.HandleFunc("GET /.well-known/est/csrattrs", s.handleCSRAttrs)
 	return mux
 }
