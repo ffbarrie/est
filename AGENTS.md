@@ -6,10 +6,10 @@ Guidance for AI coding agents working in this repository.
 
 An EST (RFC 7030 — Enrollment over Secure Transport) server, written in Go. It issues
 and renews X.509 certificates over mTLS. The CA backend is pluggable, selected at
-runtime via `ca_backend` in config: a local, `crypto/x509`-based backend (default), or
-an `openssl`-backed one that shells out to a real `openssl ca` command-line CA. An
-EJBCA-backed implementation remains a possible future third backend behind the same
-interface.
+runtime via `ca_backend` in config: a local, `crypto/x509`-based backend (default), an
+`openssl`-backed one that shells out to a real `openssl ca` command-line CA, or an
+`ejbca`-backed one that calls EJBCA's REST API over HTTPS. All three backends
+envisioned from the project's first design conversation now exist.
 
 ## Build, test, run
 
@@ -34,6 +34,7 @@ history / PR description for the exact recipe if you need to redo this by hand.
 cmd/estd/main.go        entrypoint: config load, wiring, TLS listener, graceful shutdown
 internal/ca/            CABackend interface + LocalCA (crypto/x509-based signer)
 internal/ca/openssl/    CABackend impl that shells out to `openssl ca` (see below)
+internal/ca/ejbca/      CABackend impl calling EJBCA's REST API over HTTPS (see below)
 internal/pkcs7/         degenerate PKCS#7 SignedData encode/decode (cryptobyte)
 internal/csrattrs/      CsrAttrs response encoder for /csrattrs (cryptobyte)
 internal/store/         Store interface + FileStore (CSR/cert persistence)
@@ -55,12 +56,20 @@ internal/config/        JSON config loading + validation
   are checked for `IsCA` after the fact as a defense-in-depth backstop against a
   misconfigured operator `openssl.cnf` (see `openssl-ca.example.cnf` for the
   `copy_extensions = copy` + fixed `[est_extensions]` section shape this depends on).
-- **`CABackend` and `Store` are the extension seams.** `internal/ca/openssl` is a
-  real precedent for "a second CA backend becomes a sibling package under
-  `internal/ca/` implementing the same interface" — EJBCA remains a possible third.
-  A different storage backend would replace `internal/store`'s `FileStore` without
-  touching `internal/ca` or `internal/estapi`. Don't hard-code assumptions that only
-  one implementation of either will ever exist.
+- **`CABackend` and `Store` are the extension seams.** `internal/ca/openssl` and
+  `internal/ca/ejbca` are both real precedents for "a CA backend becomes a sibling
+  package under `internal/ca/` implementing the same interface" — a fourth is just as
+  easy to add the same way. A different storage backend would replace
+  `internal/store`'s `FileStore` without touching `internal/ca` or `internal/estapi`.
+  Don't hard-code assumptions that only one implementation of either will ever exist.
+- **`internal/ca/ejbca` has never been tested against a real EJBCA instance** — only
+  a mock server shaped like EJBCA's published OpenAPI spec (Keyfactor/ejbca-ce). This
+  is different from `internal/ca/openssl`, which is tested against the real `openssl`
+  binary. If you touch this package, keep that distinction honest in comments/docs
+  rather than implying it's been verified against the genuine product. It also
+  generates a random one-time username/password per enrollment — documented as an
+  assumption about the operator's EJBCA End Entity Profile allowing ad hoc
+  credentials, not a universal guarantee.
 - **Certificate template fields that affect trust are always server-controlled,
   never taken from the CSR**: `BasicConstraints`/`IsCA`, `KeyUsage`, `ExtKeyUsage`.
   A client-supplied CSR must never be able to request `CA:true` or arbitrary EKUs.

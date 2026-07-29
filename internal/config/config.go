@@ -38,15 +38,20 @@ type Config struct {
 	ServerCertFile string   `json:"server_cert_file"`
 	ServerKeyFile  string   `json:"server_key_file"`
 	ClientCAFiles  []string `json:"client_ca_files"`
-	CACertFile     string   `json:"ca_cert_file"`
 	StoreDir       string   `json:"store_dir"`
 	CertValidity   Duration `json:"cert_validity"`
 
 	// CABackend selects which ca.CABackend implementation signs
-	// certificates: "local" (default, crypto/x509-based, in-process — the
-	// only mode that reads CAKeyFile) or "openssl" (shells out to a real
-	// `openssl ca`; see OpenSSLCA). Validate normalizes "" to "local".
+	// certificates: "local" (default, crypto/x509-based, in-process),
+	// "openssl" (shells out to a real `openssl ca`; see OpenSSLCA), or
+	// "ejbca" (EJBCA's REST API over HTTPS; see EJBCACA). Validate
+	// normalizes "" to "local".
 	CABackend string `json:"ca_backend,omitempty"`
+
+	// CACertFile is the issuing CA's certificate. Required for "local" and
+	// "openssl" (both need it to serve /cacerts from a local file); not
+	// used for "ejbca", which fetches the CA certificate live from EJBCA.
+	CACertFile string `json:"ca_cert_file,omitempty"`
 
 	// CAKeyFile is only read/required when CABackend is "local".
 	CAKeyFile string `json:"ca_key_file,omitempty"`
@@ -55,9 +60,42 @@ type Config struct {
 	// CABackend is "openssl"; ignored otherwise.
 	OpenSSLCA *OpenSSLCAConfig `json:"openssl_ca,omitempty"`
 
+	// EJBCACA configures the EJBCA-backed CABackend. Required when
+	// CABackend is "ejbca"; ignored otherwise.
+	EJBCACA *EJBCACAConfig `json:"ejbca_ca,omitempty"`
+
 	// CSRAttrs configures the GET /csrattrs response. Nil means the server
 	// has no CSR attribute requirements to advertise (responds 204).
 	CSRAttrs *CSRAttrsConfig `json:"csr_attrs,omitempty"`
+}
+
+// EJBCACAConfig configures the EJBCA-backed CABackend (internal/ca/ejbca).
+// See that package's doc comment and the README for the important caveat
+// that this backend is verified against a spec-conformant mock, not a
+// real EJBCA instance.
+type EJBCACAConfig struct {
+	// BaseURL is EJBCA's REST API base, e.g.
+	// "https://ejbca.example.com:8443/ejbca/ejbca-rest-api/v1".
+	BaseURL string `json:"base_url"`
+
+	// ClientCertFile/ClientKeyFile are estd's own certificate/key, used to
+	// authenticate to EJBCA via TLS client certificate.
+	ClientCertFile string `json:"client_cert_file"`
+	ClientKeyFile  string `json:"client_key_file"`
+
+	// ServerCAFile is a PEM bundle trusted for EJBCA's own TLS server
+	// certificate. Optional; defaults to the system trust store.
+	ServerCAFile string `json:"server_ca_file,omitempty"`
+
+	// CAName is the EJBCA CA "name" used for enrollment.
+	CAName string `json:"ca_name"`
+
+	// CASubjectDN is that CA's Subject DN, used to fetch its certificate
+	// (EJBCA identifies CAs differently across these two operations).
+	CASubjectDN string `json:"ca_subject_dn"`
+
+	CertificateProfileName string `json:"certificate_profile_name"`
+	EndEntityProfileName   string `json:"end_entity_profile_name"`
 }
 
 // OpenSSLCAConfig configures the openssl-backed CABackend
@@ -145,22 +183,21 @@ func Load(path string) (*Config, error) {
 
 // Validate checks that required fields are set and that referenced files
 // exist, so misconfiguration is caught at startup rather than on first
-// request. It also normalizes CABackend ("" becomes "local") and
-// OpenSSLCA's defaults, so callers can rely on those being filled in
-// after a successful Validate.
+// request. It also normalizes CABackend ("" becomes "local") and the
+// per-backend config's defaults, so callers can rely on those being
+// filled in after a successful Validate.
 func (c *Config) Validate() error {
 	if c.CABackend == "" {
 		c.CABackend = "local"
 	}
-	if c.CABackend != "local" && c.CABackend != "openssl" {
-		return fmt.Errorf("config: ca_backend must be \"local\" or \"openssl\", got %q", c.CABackend)
+	if c.CABackend != "local" && c.CABackend != "openssl" && c.CABackend != "ejbca" {
+		return fmt.Errorf("config: ca_backend must be \"local\", \"openssl\", or \"ejbca\", got %q", c.CABackend)
 	}
 
 	required := map[string]string{
 		"listen_addr":      c.ListenAddr,
 		"server_cert_file": c.ServerCertFile,
 		"server_key_file":  c.ServerKeyFile,
-		"ca_cert_file":     c.CACertFile,
 		"store_dir":        c.StoreDir,
 	}
 	for field, value := range required {
@@ -175,15 +212,22 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: cert_validity must be a positive duration")
 	}
 
-	files := append([]string{c.ServerCertFile, c.ServerKeyFile, c.CACertFile}, c.ClientCAFiles...)
+	files := append([]string{c.ServerCertFile, c.ServerKeyFile}, c.ClientCAFiles...)
 
 	switch c.CABackend {
 	case "local":
+		if c.CACertFile == "" {
+			return fmt.Errorf("config: ca_cert_file is required when ca_backend is \"local\"")
+		}
 		if c.CAKeyFile == "" {
 			return fmt.Errorf("config: ca_key_file is required when ca_backend is \"local\"")
 		}
-		files = append(files, c.CAKeyFile)
+		files = append(files, c.CACertFile, c.CAKeyFile)
 	case "openssl":
+		if c.CACertFile == "" {
+			return fmt.Errorf("config: ca_cert_file is required when ca_backend is \"openssl\"")
+		}
+		files = append(files, c.CACertFile)
 		if c.OpenSSLCA == nil {
 			return fmt.Errorf("config: openssl_ca is required when ca_backend is \"openssl\"")
 		}
@@ -200,6 +244,30 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: openssl_ca.openssl_path: %w", err)
 		}
 		files = append(files, c.OpenSSLCA.ConfigFile)
+	case "ejbca":
+		// ca_cert_file/ca_key_file intentionally not used: the CA
+		// certificate is fetched live from EJBCA, same as signing.
+		if c.EJBCACA == nil {
+			return fmt.Errorf("config: ejbca_ca is required when ca_backend is \"ejbca\"")
+		}
+		e := c.EJBCACA
+		for field, value := range map[string]string{
+			"ejbca_ca.base_url":                 e.BaseURL,
+			"ejbca_ca.client_cert_file":         e.ClientCertFile,
+			"ejbca_ca.client_key_file":          e.ClientKeyFile,
+			"ejbca_ca.ca_name":                  e.CAName,
+			"ejbca_ca.ca_subject_dn":            e.CASubjectDN,
+			"ejbca_ca.certificate_profile_name": e.CertificateProfileName,
+			"ejbca_ca.end_entity_profile_name":  e.EndEntityProfileName,
+		} {
+			if value == "" {
+				return fmt.Errorf("config: %s is required", field)
+			}
+		}
+		files = append(files, e.ClientCertFile, e.ClientKeyFile)
+		if e.ServerCAFile != "" {
+			files = append(files, e.ServerCAFile)
+		}
 	}
 
 	for _, f := range files {

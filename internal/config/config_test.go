@@ -315,3 +315,92 @@ func TestValidate_OpenSSLBackend_MissingBinary(t *testing.T) {
 		t.Error("Validate: expected error for unresolvable openssl_path, got nil")
 	}
 }
+
+func validEJBCACAConfig(f string) *EJBCACAConfig {
+	return &EJBCACAConfig{
+		BaseURL:                "https://ejbca.example.test:8443/ejbca/ejbca-rest-api/v1",
+		ClientCertFile:         f,
+		ClientKeyFile:          f,
+		CAName:                 "TestCA",
+		CASubjectDN:            "CN=Test Root CA",
+		CertificateProfileName: "ENDUSER",
+		EndEntityProfileName:   "ExampleEEP",
+	}
+}
+
+func TestValidate_EJBCABackend_OK(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "ejbca",
+		EJBCACA:   validEJBCACAConfig(f),
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate: unexpected error: %v", err)
+	}
+	// ca_cert_file/ca_key_file are not needed under the ejbca backend and
+	// were never set above.
+}
+
+func TestValidate_EJBCABackend_RequiresEJBCACA(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "ejbca",
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate: expected error for missing ejbca_ca, got nil")
+	}
+}
+
+func TestValidate_EJBCABackend_MissingRequiredField(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	e := validEJBCACAConfig(f)
+	e.CASubjectDN = ""
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "ejbca",
+		EJBCACA:   e,
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate: expected error for missing ejbca_ca.ca_subject_dn, got nil")
+	}
+}
+
+func TestValidate_EJBCABackend_MissingClientCertFile(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	e := validEJBCACAConfig(f)
+	e.ClientCertFile = filepath.Join(dir, "does-not-exist.crt")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "ejbca",
+		EJBCACA:   e,
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate: expected error for nonexistent ejbca_ca.client_cert_file, got nil")
+	}
+}
+
+func TestValidate_EJBCABackend_ServerCAFileMustExistIfSet(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	e := validEJBCACAConfig(f)
+	e.ServerCAFile = filepath.Join(dir, "does-not-exist.crt")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "ejbca",
+		EJBCACA:   e,
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate: expected error for nonexistent ejbca_ca.server_ca_file, got nil")
+	}
+}

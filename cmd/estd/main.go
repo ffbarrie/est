@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ffbarrie/est/internal/ca"
+	ejbcaca "github.com/ffbarrie/est/internal/ca/ejbca"
 	opensslca "github.com/ffbarrie/est/internal/ca/openssl"
 	"github.com/ffbarrie/est/internal/config"
 	"github.com/ffbarrie/est/internal/csrattrs"
@@ -54,6 +55,21 @@ func run(configPath string) error {
 			return err
 		}
 		caBackend = opensslca.NewCA(cfg.OpenSSLCA.OpenSSLPath, cfg.OpenSSLCA.ConfigFile, caCert, cfg.OpenSSLCA.ExtensionsSection)
+	case "ejbca":
+		e := cfg.EJBCACA
+		caBackend, err = ejbcaca.NewCA(ejbcaca.Options{
+			BaseURL:                e.BaseURL,
+			ClientCertFile:         e.ClientCertFile,
+			ClientKeyFile:          e.ClientKeyFile,
+			ServerCAFile:           e.ServerCAFile,
+			CAName:                 e.CAName,
+			CASubjectDN:            e.CASubjectDN,
+			CertificateProfileName: e.CertificateProfileName,
+			EndEntityProfileName:   e.EndEntityProfileName,
+		})
+		if err != nil {
+			return err
+		}
 	default: // "local", normalized by cfg.Validate
 		caCert, caKey, err := ca.LoadCAKeyPair(cfg.CACertFile, cfg.CAKeyFile)
 		if err != nil {
