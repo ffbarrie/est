@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 )
 
@@ -38,13 +39,44 @@ type Config struct {
 	ServerKeyFile  string   `json:"server_key_file"`
 	ClientCAFiles  []string `json:"client_ca_files"`
 	CACertFile     string   `json:"ca_cert_file"`
-	CAKeyFile      string   `json:"ca_key_file"`
 	StoreDir       string   `json:"store_dir"`
 	CertValidity   Duration `json:"cert_validity"`
+
+	// CABackend selects which ca.CABackend implementation signs
+	// certificates: "local" (default, crypto/x509-based, in-process — the
+	// only mode that reads CAKeyFile) or "openssl" (shells out to a real
+	// `openssl ca`; see OpenSSLCA). Validate normalizes "" to "local".
+	CABackend string `json:"ca_backend,omitempty"`
+
+	// CAKeyFile is only read/required when CABackend is "local".
+	CAKeyFile string `json:"ca_key_file,omitempty"`
+
+	// OpenSSLCA configures the openssl-backed CABackend. Required when
+	// CABackend is "openssl"; ignored otherwise.
+	OpenSSLCA *OpenSSLCAConfig `json:"openssl_ca,omitempty"`
 
 	// CSRAttrs configures the GET /csrattrs response. Nil means the server
 	// has no CSR attribute requirements to advertise (responds 204).
 	CSRAttrs *CSRAttrsConfig `json:"csr_attrs,omitempty"`
+}
+
+// OpenSSLCAConfig configures the openssl-backed CABackend
+// (internal/ca/openssl). See openssl-ca.example.cnf at the repo root for
+// the required openssl.cnf shape.
+type OpenSSLCAConfig struct {
+	// OpenSSLPath is the path to the openssl binary. Defaults to
+	// "openssl" (resolved via PATH); Validate resolves it via
+	// exec.LookPath so a missing binary fails at startup, not on first
+	// enrollment.
+	OpenSSLPath string `json:"openssl_path,omitempty"`
+
+	// ConfigFile is the operator's openssl.cnf.
+	ConfigFile string `json:"config_file"`
+
+	// ExtensionsSection names the -extensions section within ConfigFile
+	// that fixes BasicConstraints/KeyUsage/ExtKeyUsage. Defaults to
+	// "est_extensions".
+	ExtensionsSection string `json:"extensions_section,omitempty"`
 }
 
 // CSRAttrsConfig is the plain-JSON shape of internal/csrattrs.Options — it
@@ -113,14 +145,22 @@ func Load(path string) (*Config, error) {
 
 // Validate checks that required fields are set and that referenced files
 // exist, so misconfiguration is caught at startup rather than on first
-// request.
+// request. It also normalizes CABackend ("" becomes "local") and
+// OpenSSLCA's defaults, so callers can rely on those being filled in
+// after a successful Validate.
 func (c *Config) Validate() error {
+	if c.CABackend == "" {
+		c.CABackend = "local"
+	}
+	if c.CABackend != "local" && c.CABackend != "openssl" {
+		return fmt.Errorf("config: ca_backend must be \"local\" or \"openssl\", got %q", c.CABackend)
+	}
+
 	required := map[string]string{
 		"listen_addr":      c.ListenAddr,
 		"server_cert_file": c.ServerCertFile,
 		"server_key_file":  c.ServerKeyFile,
 		"ca_cert_file":     c.CACertFile,
-		"ca_key_file":      c.CAKeyFile,
 		"store_dir":        c.StoreDir,
 	}
 	for field, value := range required {
@@ -135,7 +175,33 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: cert_validity must be a positive duration")
 	}
 
-	files := append([]string{c.ServerCertFile, c.ServerKeyFile, c.CACertFile, c.CAKeyFile}, c.ClientCAFiles...)
+	files := append([]string{c.ServerCertFile, c.ServerKeyFile, c.CACertFile}, c.ClientCAFiles...)
+
+	switch c.CABackend {
+	case "local":
+		if c.CAKeyFile == "" {
+			return fmt.Errorf("config: ca_key_file is required when ca_backend is \"local\"")
+		}
+		files = append(files, c.CAKeyFile)
+	case "openssl":
+		if c.OpenSSLCA == nil {
+			return fmt.Errorf("config: openssl_ca is required when ca_backend is \"openssl\"")
+		}
+		if c.OpenSSLCA.ConfigFile == "" {
+			return fmt.Errorf("config: openssl_ca.config_file is required")
+		}
+		if c.OpenSSLCA.OpenSSLPath == "" {
+			c.OpenSSLCA.OpenSSLPath = "openssl"
+		}
+		if c.OpenSSLCA.ExtensionsSection == "" {
+			c.OpenSSLCA.ExtensionsSection = "est_extensions"
+		}
+		if _, err := exec.LookPath(c.OpenSSLCA.OpenSSLPath); err != nil {
+			return fmt.Errorf("config: openssl_ca.openssl_path: %w", err)
+		}
+		files = append(files, c.OpenSSLCA.ConfigFile)
+	}
+
 	for _, f := range files {
 		if _, err := os.Stat(f); err != nil {
 			return fmt.Errorf("config: %s: %w", f, err)

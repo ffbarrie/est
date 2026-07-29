@@ -1,0 +1,62 @@
+# Example openssl.cnf for the openssl-backed CABackend (internal/ca/openssl),
+# selected via "ca_backend": "openssl" in config.json (see config.example.json).
+#
+# Before first use, initialize the CA directory this file points at:
+#
+#   mkdir -p /etc/estd/openssl-ca/newcerts
+#   touch /etc/estd/openssl-ca/index.txt
+#   echo "unique_subject = no" > /etc/estd/openssl-ca/index.txt.attr
+#   echo 1000 > /etc/estd/openssl-ca/serial
+#
+# ...and provide your own CA certificate/key at the `certificate`/`private_key`
+# paths below (openssl req -x509 ..., or an existing CA's materials).
+#
+# The est_extensions section below is not just an example — its two
+# properties together are load-bearing for safe operation and were verified
+# empirically before this file was written:
+#
+#   1. copy_extensions = copy   lets a CSR's requested SAN (subjectAltName)
+#      be copied into the issued certificate.
+#   2. The [est_extensions] section explicitly fixes basicConstraints,
+#      keyUsage, and extendedKeyUsage.
+#
+# Because (2) explicitly sets those three extensions, (1)'s copy_extensions
+# can NEVER override them with whatever a CSR requests — a CSR that smuggles
+# basicConstraints=CA:TRUE via its extensionRequest attribute is issued with
+# CA:FALSE regardless (internal/ca/openssl's tests include this exact
+# adversarial case). Do not remove any of the three fixed extensions below,
+# and do not set copy_extensions to anything other than "copy" (in
+# particular, never "copyall", which would let CSR-requested extensions not
+# already fixed here take effect unconstrained).
+
+[ca]
+default_ca = est_ca
+
+[est_ca]
+dir             = /etc/estd/openssl-ca
+database        = $dir/index.txt
+serial          = $dir/serial
+new_certs_dir   = $dir/newcerts
+certificate     = $dir/ca.crt
+private_key     = $dir/ca.key
+default_md      = sha256
+default_days    = 365
+policy          = est_policy
+copy_extensions = copy
+x509_extensions = est_extensions
+
+[est_policy]
+# "supplied" means the CSR's value is used as-is; "match"/"optional" are
+# also available per openssl-ca(1) but aren't needed for a typical EST
+# deployment where clients supply their own identifying fields.
+commonName             = supplied
+organizationName       = optional
+organizationalUnitName = optional
+countryName            = optional
+
+[est_extensions]
+# These three lines are the server-controlled guarantee described above —
+# never derived from the CSR, regardless of copy_extensions.
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth
