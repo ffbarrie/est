@@ -220,4 +220,98 @@ func TestValidate_OK(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Errorf("Validate: unexpected error: %v", err)
 	}
+	if c.CABackend != "local" {
+		t.Errorf("CABackend = %q, want normalized \"local\"", c.CABackend)
+	}
+}
+
+func TestValidate_InvalidCABackend(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		CACertFile: f, CAKeyFile: f, StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "bogus",
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate: expected error for invalid ca_backend, got nil")
+	}
+}
+
+func TestValidate_LocalBackendRequiresCAKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		CACertFile: f, StoreDir: dir, CertValidity: Duration(time.Hour),
+		// CAKeyFile deliberately omitted; CABackend defaults to "local".
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate: expected error for missing ca_key_file under local backend, got nil")
+	}
+}
+
+func TestValidate_OpenSSLBackend_OK(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	cnf := writeConfig(t, dir, "openssl.cnf", "[ca]\n")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		CACertFile: f, StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "openssl",
+		OpenSSLCA: &OpenSSLCAConfig{ConfigFile: cnf},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: unexpected error: %v", err)
+	}
+	if c.OpenSSLCA.OpenSSLPath != "openssl" {
+		t.Errorf("OpenSSLPath = %q, want normalized \"openssl\"", c.OpenSSLCA.OpenSSLPath)
+	}
+	if c.OpenSSLCA.ExtensionsSection != "est_extensions" {
+		t.Errorf("ExtensionsSection = %q, want normalized \"est_extensions\"", c.OpenSSLCA.ExtensionsSection)
+	}
+	// ca_key_file is not required (and was never set above) under the
+	// openssl backend.
+}
+
+func TestValidate_OpenSSLBackend_RequiresOpenSSLCA(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		CACertFile: f, StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "openssl",
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate: expected error for missing openssl_ca, got nil")
+	}
+}
+
+func TestValidate_OpenSSLBackend_MissingConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		CACertFile: f, StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "openssl",
+		OpenSSLCA: &OpenSSLCAConfig{ConfigFile: filepath.Join(dir, "does-not-exist.cnf")},
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate: expected error for nonexistent openssl_ca.config_file, got nil")
+	}
+}
+
+func TestValidate_OpenSSLBackend_MissingBinary(t *testing.T) {
+	dir := t.TempDir()
+	f := writeConfig(t, dir, "f.pem", "x")
+	cnf := writeConfig(t, dir, "openssl.cnf", "[ca]\n")
+	c := &Config{
+		ListenAddr: ":8443", ServerCertFile: f, ServerKeyFile: f, ClientCAFiles: []string{f},
+		CACertFile: f, StoreDir: dir, CertValidity: Duration(time.Hour),
+		CABackend: "openssl",
+		OpenSSLCA: &OpenSSLCAConfig{ConfigFile: cnf, OpenSSLPath: "/no/such/openssl-binary"},
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate: expected error for unresolvable openssl_path, got nil")
+	}
 }

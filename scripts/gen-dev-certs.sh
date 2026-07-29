@@ -55,13 +55,77 @@ cat > "$OUT_DIR/config.json" <<EOF
 }
 EOF
 
-echo "Done. Try it with Docker:"
+# A second, throwaway openssl-ca(1) CA directory (index.txt/serial/newcerts),
+# reusing the same root CA key/cert generated above, for testing
+# "ca_backend": "openssl" (internal/ca/openssl) locally. The est_extensions
+# shape here (copy_extensions=copy + a fixed extensions section) is the same
+# one verified in internal/ca/openssl's tests and documented in
+# openssl-ca.example.cnf at the repo root — see that file for why it's safe.
+OPENSSL_CA_DIR="$OUT_DIR/openssl-ca"
+mkdir -p "$OPENSSL_CA_DIR/newcerts"
+touch "$OPENSSL_CA_DIR/index.txt"
+echo "unique_subject = no" > "$OPENSSL_CA_DIR/index.txt.attr"
+echo 1000 > "$OPENSSL_CA_DIR/serial"
+cp "$OUT_DIR/ca.crt" "$OPENSSL_CA_DIR/ca.crt"
+cp "$OUT_DIR/ca.key" "$OPENSSL_CA_DIR/ca.key"
+
+cat > "$OPENSSL_CA_DIR/openssl.cnf" <<EOF
+[ca]
+default_ca = est_ca
+
+[est_ca]
+dir             = $OPENSSL_CA_DIR
+database        = \$dir/index.txt
+serial          = \$dir/serial
+new_certs_dir   = \$dir/newcerts
+certificate     = \$dir/ca.crt
+private_key     = \$dir/ca.key
+default_md      = sha256
+default_days    = 365
+policy          = est_policy
+copy_extensions = copy
+x509_extensions = est_extensions
+
+[est_policy]
+commonName = supplied
+
+[est_extensions]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth
+EOF
+
+cat > "$OUT_DIR/config-openssl.json" <<EOF
+{
+  "listen_addr": "0.0.0.0:8443",
+  "server_cert_file": "/etc/estd/server.crt",
+  "server_key_file": "/etc/estd/server.key",
+  "client_ca_files": ["/etc/estd/ca.crt"],
+  "ca_cert_file": "/etc/estd/ca.crt",
+  "store_dir": "/var/lib/estd",
+  "cert_validity": "8760h",
+  "ca_backend": "openssl",
+  "openssl_ca": {
+    "config_file": "/etc/estd/openssl-ca/openssl.cnf"
+  }
+}
+EOF
+
+echo "Done. Try it with Docker (default local, crypto/x509-based CA backend):"
 echo
 echo "  docker run --rm -p 8443:8443 \\"
 echo "    -v $OUT_DIR:/etc/estd:ro \\"
 echo "    -v $OUT_DIR/data:/var/lib/estd:rw \\"
 echo "    ghcr.io/ffbarrie/est:develop"
 echo
-echo "Then, from another terminal:"
+echo "...or with the openssl-backed CA (config-openssl.json + openssl-ca/, generated alongside"
+echo "config.json above), overriding the default config path:"
+echo
+echo "  docker run --rm -p 8443:8443 \\"
+echo "    -v $OUT_DIR:/etc/estd:ro \\"
+echo "    -v $OUT_DIR/data:/var/lib/estd:rw \\"
+echo "    ghcr.io/ffbarrie/est:develop -config /etc/estd/config-openssl.json"
+echo
+echo "Then, from another terminal, either way:"
 echo
 echo "  curl --cacert $OUT_DIR/server.crt https://localhost:8443/.well-known/est/cacerts"

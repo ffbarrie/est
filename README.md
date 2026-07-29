@@ -48,10 +48,40 @@ field reference below.
 | `listen_addr` | yes | Address to listen on, e.g. `"0.0.0.0:8443"` |
 | `server_cert_file` / `server_key_file` | yes | The server's own TLS certificate/key (PEM) |
 | `client_ca_files` | yes | PEM bundle(s) of CA certificates trusted for client mTLS |
-| `ca_cert_file` / `ca_key_file` | yes | The issuing CA's certificate/key (PEM) — signs every certificate this server issues |
+| `ca_cert_file` | yes | The issuing CA's certificate (PEM) — always required, regardless of backend |
+| `ca_backend` | no | `"local"` (default) or `"openssl"` — which `CABackend` signs certificates; see below |
+| `ca_key_file` | only for `ca_backend: "local"` | The issuing CA's private key (PEM). Not read at all under `"openssl"` |
+| `openssl_ca` | only for `ca_backend: "openssl"` | `{config_file, openssl_path, extensions_section}` — see below |
 | `store_dir` | yes | Directory where issued certificates and CSRs are persisted |
 | `cert_validity` | yes | Validity duration given to every issued certificate, e.g. `"8760h"` |
 | `csr_attrs` | no | Configures the `GET /csrattrs` response; omit entirely for a `204` response |
+
+### CA backends
+
+Two `ca.CABackend` implementations exist, selected by `ca_backend`:
+
+- **`"local"`** (default) — signs in-process via `crypto/x509`, no external process. `ca_key_file` is required in
+  this mode; the server process holds the CA private key in memory.
+- **`"openssl"`** — signs by shelling out to a real `openssl ca` command against an operator-provisioned OpenSSL CA
+  directory (the classic `index.txt`/`serial`/`newcerts/` flat-file database). The server process **never reads or
+  holds the CA private key** in this mode — key access is delegated entirely to the `openssl` subprocess, whose own
+  `openssl.cnf` points at it. Configure it with:
+  ```json
+  "ca_backend": "openssl",
+  "openssl_ca": {
+    "config_file": "/etc/estd/openssl-ca/openssl.cnf"
+  }
+  ```
+  See [openssl-ca.example.cnf](openssl-ca.example.cnf) for a fully worked, tested `openssl.cnf` — including the
+  `copy_extensions = copy` + fixed `[est_extensions]` section combination that keeps `BasicConstraints`/`KeyUsage`/
+  `ExtKeyUsage` server-controlled (never CSR-derived) while still copying a requested SAN through, the same
+  guarantee `LocalCA` provides in Go code. `scripts/gen-dev-certs.sh` also generates a throwaway OpenSSL CA
+  directory (`openssl-ca/` + `config-openssl.json`) alongside its usual dev certs, for trying this backend locally.
+
+  **Not currently usable with the published Docker image**: the distroless base has no shell, package manager, or
+  `openssl` binary at all (by design — see [Running via Docker](#running-via-docker)), so `ca_backend: "openssl"`
+  will fail `config.Validate()`'s startup check inside that container. Use the `"local"` backend in Docker, or the
+  `openssl` backend when running `estd` directly on a host that has `openssl` installed.
 
 `csr_attrs` supports two mechanisms, and both are documented in `config.example.json`:
 

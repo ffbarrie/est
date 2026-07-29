@@ -1,5 +1,7 @@
-// Command estd runs an EST (RFC 7030) server backed by a local,
-// crypto/x509-based CA.
+// Command estd runs an EST (RFC 7030) server backed by a pluggable
+// ca.CABackend — a local, crypto/x509-based CA by default, or a real
+// `openssl ca` command-line CA when configured (see ca_backend in
+// internal/config).
 package main
 
 import (
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ffbarrie/est/internal/ca"
+	opensslca "github.com/ffbarrie/est/internal/ca/openssl"
 	"github.com/ffbarrie/est/internal/config"
 	"github.com/ffbarrie/est/internal/csrattrs"
 	"github.com/ffbarrie/est/internal/estapi"
@@ -43,11 +46,21 @@ func run(configPath string) error {
 		return err
 	}
 
-	caCert, caKey, err := ca.LoadCAKeyPair(cfg.CACertFile, cfg.CAKeyFile)
-	if err != nil {
-		return err
+	var caBackend ca.CABackend
+	switch cfg.CABackend {
+	case "openssl":
+		caCert, err := opensslca.LoadCACertificate(cfg.CACertFile)
+		if err != nil {
+			return err
+		}
+		caBackend = opensslca.NewCA(cfg.OpenSSLCA.OpenSSLPath, cfg.OpenSSLCA.ConfigFile, caCert, cfg.OpenSSLCA.ExtensionsSection)
+	default: // "local", normalized by cfg.Validate
+		caCert, caKey, err := ca.LoadCAKeyPair(cfg.CACertFile, cfg.CAKeyFile)
+		if err != nil {
+			return err
+		}
+		caBackend = ca.NewLocalCA(caCert, caKey, ca.RandomSerialSource{}, time.Duration(cfg.CertValidity))
 	}
-	localCA := ca.NewLocalCA(caCert, caKey, ca.RandomSerialSource{}, time.Duration(cfg.CertValidity))
 
 	fileStore, err := store.NewFileStore(cfg.StoreDir)
 	if err != nil {
@@ -64,7 +77,7 @@ func run(configPath string) error {
 		return err
 	}
 
-	srv := estapi.NewServer(localCA, fileStore, csrAttrsDER)
+	srv := estapi.NewServer(caBackend, fileStore, csrAttrsDER)
 
 	httpServer := &http.Server{
 		Addr:      cfg.ListenAddr,

@@ -5,9 +5,11 @@ Guidance for AI coding agents working in this repository.
 ## What this is
 
 An EST (RFC 7030 — Enrollment over Secure Transport) server, written in Go. It issues
-and renews X.509 certificates over mTLS. The CA backend is pluggable; v1 ships a
-local, `crypto/x509`-based backend, with an EJBCA-backed implementation planned as a
-second backend behind the same interface.
+and renews X.509 certificates over mTLS. The CA backend is pluggable, selected at
+runtime via `ca_backend` in config: a local, `crypto/x509`-based backend (default), or
+an `openssl`-backed one that shells out to a real `openssl ca` command-line CA. An
+EJBCA-backed implementation remains a possible future third backend behind the same
+interface.
 
 ## Build, test, run
 
@@ -31,7 +33,9 @@ history / PR description for the exact recipe if you need to redo this by hand.
 ```
 cmd/estd/main.go        entrypoint: config load, wiring, TLS listener, graceful shutdown
 internal/ca/            CABackend interface + LocalCA (crypto/x509-based signer)
-internal/pkcs7/         hand-rolled degenerate PKCS#7 SignedData encode/decode
+internal/ca/openssl/    CABackend impl that shells out to `openssl ca` (see below)
+internal/pkcs7/         degenerate PKCS#7 SignedData encode/decode (cryptobyte)
+internal/csrattrs/      CsrAttrs response encoder for /csrattrs (cryptobyte)
 internal/store/         Store interface + FileStore (CSR/cert persistence)
 internal/estapi/        HTTP handlers, TLS/mTLS config, routing
 internal/config/        JSON config loading + validation
@@ -39,15 +43,24 @@ internal/config/        JSON config loading + validation
 
 ## Conventions and constraints (don't relitigate these without asking)
 
-- **No shelling out to `openssl` at runtime.** The CA backend signs certificates
-  in-process via `crypto/x509`. `openssl` is used only as a *test-time oracle*
-  (see `internal/pkcs7/pkcs7_test.go`) to cross-check our hand-rolled ASN.1 output —
-  never invoked by the server itself.
-- **`CABackend` and `Store` are the extension seams.** A second CA backend (e.g.
-  EJBCA) becomes a sibling package under `internal/ca/` implementing the same
-  interface; a different storage backend replaces `internal/store`'s `FileStore`
-  without touching `internal/ca` or `internal/estapi`. Don't hard-code assumptions
-  that only one implementation of either will ever exist.
+- **`LocalCA` never shells out; `internal/ca/openssl` deliberately does, and only
+  there.** `internal/pkcs7` and `internal/csrattrs` use `openssl` solely as a
+  *test-time oracle* (see `internal/pkcs7/pkcs7_test.go`), never invoked by the
+  server itself. `internal/ca/openssl` is the one exception, by design: it's a
+  `ca_backend: "openssl"`-selected `CABackend` that signs by invoking a real
+  `openssl ca` subprocess against an operator's CA directory. If you touch that
+  package, preserve its two load-bearing safety properties (both have tests): CSR
+  content only ever reaches `openssl` via a temp file path argument, never a CLI
+  argument or shell string (no command-injection surface); and issued certificates
+  are checked for `IsCA` after the fact as a defense-in-depth backstop against a
+  misconfigured operator `openssl.cnf` (see `openssl-ca.example.cnf` for the
+  `copy_extensions = copy` + fixed `[est_extensions]` section shape this depends on).
+- **`CABackend` and `Store` are the extension seams.** `internal/ca/openssl` is a
+  real precedent for "a second CA backend becomes a sibling package under
+  `internal/ca/` implementing the same interface" — EJBCA remains a possible third.
+  A different storage backend would replace `internal/store`'s `FileStore` without
+  touching `internal/ca` or `internal/estapi`. Don't hard-code assumptions that only
+  one implementation of either will ever exist.
 - **Certificate template fields that affect trust are always server-controlled,
   never taken from the CSR**: `BasicConstraints`/`IsCA`, `KeyUsage`, `ExtKeyUsage`.
   A client-supplied CSR must never be able to request `CA:true` or arbitrary EKUs.
