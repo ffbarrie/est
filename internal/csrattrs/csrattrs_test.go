@@ -212,6 +212,66 @@ func TestValidate_TemplateKeyTypeRequiresCurve(t *testing.T) {
 	}
 }
 
+func TestEncode_InvalidOID(t *testing.T) {
+	cases := []struct {
+		name string
+		opts Options
+	}{
+		{"extra_oids", Options{ExtraOIDs: []string{"not-an-oid"}}},
+		{"key_algorithm.oid", Options{KeyAlgorithm: &KeyAlgorithm{OID: "not-an-oid"}}},
+		{"key_algorithm.curve_oid", Options{KeyAlgorithm: &KeyAlgorithm{OID: "1.2.840.10045.2.1", CurveOID: "not-an-oid"}}},
+		{"required_extensions.oid", Options{RequiredExtensions: []Extension{{OID: "not-an-oid", ValueHex: "0500"}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Encode(tc.opts); err == nil {
+				t.Errorf("Encode: expected error for invalid OID, got nil")
+			}
+		})
+	}
+}
+
+func TestEncode_InvalidValueHex(t *testing.T) {
+	badHex := "not-hex"
+
+	t.Run("required_extensions", func(t *testing.T) {
+		opts := Options{RequiredExtensions: []Extension{{OID: "2.5.29.17", ValueHex: "zz"}}}
+		if _, err := Encode(opts); err == nil {
+			t.Error("Encode: expected error for invalid value_hex, got nil")
+		}
+	})
+
+	t.Run("template extension", func(t *testing.T) {
+		opts := Options{Template: &Template{Extensions: []TemplateExtension{{OID: "2.5.29.17", ValueHex: &badHex}}}}
+		if _, err := Encode(opts); err == nil {
+			t.Error("Encode: expected error for invalid value_hex, got nil")
+		}
+	})
+}
+
+func TestEncode_KeyAlgorithmWithNoParams(t *testing.T) {
+	// Neither CurveOID nor RSAModulusBits set: the algorithm is required
+	// with no further constraint, encoded as an Attribute with an empty
+	// values SET (RFC 9908 §3.2: "MAY be empty to indicate no further
+	// requirements on the key").
+	der, err := Encode(Options{KeyAlgorithm: &KeyAlgorithm{OID: "1.2.840.10045.2.1"}})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	items := topLevelItems(t, der)
+	if len(items) != 1 {
+		t.Fatalf("got %d top-level items, want 1", len(items))
+	}
+	var attr asn1Attribute
+	if _, err := asn1.Unmarshal(items[0].FullBytes, &attr); err != nil {
+		t.Fatalf("unmarshal attribute: %v", err)
+	}
+	if len(attr.Values) != 0 {
+		t.Errorf("Values = %v, want empty SET", attr.Values)
+	}
+}
+
 // asn1parse runs `openssl asn1parse` over der and returns its text output,
 // used as an independent structural oracle for the template mechanism
 // (RFC 9908's §3.4 worked example is given as an ASN.1 dump, not raw
