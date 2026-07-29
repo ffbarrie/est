@@ -48,17 +48,21 @@ field reference below.
 | `listen_addr` | yes | Address to listen on, e.g. `"0.0.0.0:8443"` |
 | `server_cert_file` / `server_key_file` | yes | The server's own TLS certificate/key (PEM) |
 | `client_ca_files` | yes | PEM bundle(s) of CA certificates trusted for client mTLS |
-| `ca_cert_file` | yes | The issuing CA's certificate (PEM) — always required, regardless of backend |
-| `ca_backend` | no | `"local"` (default) or `"openssl"` — which `CABackend` signs certificates; see below |
-| `ca_key_file` | only for `ca_backend: "local"` | The issuing CA's private key (PEM). Not read at all under `"openssl"` |
+| `ca_backend` | no | `"local"` (default), `"openssl"`, or `"ejbca"` — which `CABackend` signs certificates; see below |
+| `ca_cert_file` | only for `ca_backend: "local"`/`"openssl"` | The issuing CA's certificate (PEM). Not read under `"ejbca"`, which fetches it live |
+| `ca_key_file` | only for `ca_backend: "local"` | The issuing CA's private key (PEM). Not read under `"openssl"`/`"ejbca"` |
 | `openssl_ca` | only for `ca_backend: "openssl"` | `{config_file, openssl_path, extensions_section}` — see below |
+| `ejbca_ca` | only for `ca_backend: "ejbca"` | `{base_url, client_cert_file, client_key_file, ca_name, ca_subject_dn, certificate_profile_name, end_entity_profile_name, server_ca_file?}` — see below |
 | `store_dir` | yes | Directory where issued certificates and CSRs are persisted |
 | `cert_validity` | yes | Validity duration given to every issued certificate, e.g. `"8760h"` |
 | `csr_attrs` | no | Configures the `GET /csrattrs` response; omit entirely for a `204` response |
 
 ### CA backends
 
-Two `ca.CABackend` implementations exist, selected by `ca_backend`:
+Three `ca.CABackend` implementations exist, selected by `ca_backend`. They differ in where the CA certificate and
+private key live: `"local"` is fully offline (both in this process), `"openssl"` is local-file-plus-subprocess (CA
+cert read locally, key never leaves the `openssl` subprocess), `"ejbca"` is fully remote (both fetched from EJBCA
+over HTTPS, nothing CA-related stored locally at all).
 
 - **`"local"`** (default) — signs in-process via `crypto/x509`, no external process. `ca_key_file` is required in
   this mode; the server process holds the CA private key in memory.
@@ -82,6 +86,30 @@ Two `ca.CABackend` implementations exist, selected by `ca_backend`:
   `openssl` binary at all (by design — see [Running via Docker](#running-via-docker)), so `ca_backend: "openssl"`
   will fail `config.Validate()`'s startup check inside that container. Use the `"local"` backend in Docker, or the
   `openssl` backend when running `estd` directly on a host that has `openssl` installed.
+- **`"ejbca"`** — signs via [EJBCA's REST API](https://docs.keyfactor.com/ejbca/latest/ejbca-rest-interface) over
+  HTTPS, authenticating to EJBCA with a TLS client certificate (the same mechanism EJBCA's own Admin GUI uses,
+  mapped to an administrator role with enrollment privileges). Neither `ca_cert_file` nor `ca_key_file` is read in
+  this mode — the CA certificate is fetched live from EJBCA too. Configure it with:
+  ```json
+  "ca_backend": "ejbca",
+  "ejbca_ca": {
+    "base_url": "https://ejbca.example.com:8443/ejbca/ejbca-rest-api/v1",
+    "client_cert_file": "/etc/estd/ejbca-client.crt",
+    "client_key_file": "/etc/estd/ejbca-client.key",
+    "ca_name": "ExampleCA",
+    "ca_subject_dn": "CN=Example CA,O=Example Org,C=SE",
+    "certificate_profile_name": "ENDUSER",
+    "end_entity_profile_name": "ExampleEEP"
+  }
+  ```
+  Each enrollment generates a random, one-time username/password to satisfy EJBCA's end-entity model — **this
+  assumes the configured End Entity Profile permits ad hoc/self-service enrollment with arbitrary credentials**,
+  which is not universal across EJBCA deployments; check this against your own profile configuration.
+
+  **Verification caveat, stated plainly**: unlike the other two backends, this one was built and tested against a
+  mock server shaped like EJBCA's published OpenAPI spec, not a real EJBCA instance (none was available during
+  development). Treat it as a spec-conformant starting point, and validate it against your own deployment before
+  relying on it.
 
 `csr_attrs` supports two mechanisms, and both are documented in `config.example.json`:
 
