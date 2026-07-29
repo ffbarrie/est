@@ -3,6 +3,14 @@
 // signer, no signature, and no encapsulated content. This is the wire format
 // EST uses for /cacerts responses and for the certificate returned by
 // /simpleenroll and /simplereenroll.
+//
+// Structures are built/parsed with golang.org/x/crypto/cryptobyte rather than
+// encoding/asn1's struct-tag-driven (un)marshaling: the nesting of
+// Builder.AddASN1/String.ReadASN1 calls mirrors the ASN.1 module text
+// directly (an EXPLICIT tag is a nested AddASN1 call; an IMPLICIT tag is a
+// context tag used in place of the universal one), which is easier to verify
+// against the RFC by inspection than a struct-tag encoding of the same
+// structure.
 package pkcs7
 
 import (
@@ -10,6 +18,9 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+
+	"golang.org/x/crypto/cryptobyte"
+	casn1 "golang.org/x/crypto/cryptobyte/asn1"
 )
 
 var (
@@ -17,77 +28,50 @@ var (
 	oidSignedData = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}
 )
 
-// contentInfo is the outer PKCS#7 envelope: a content type OID plus an
-// explicitly-tagged [0] content whose structure depends on that type.
-type contentInfo struct {
-	ContentType asn1.ObjectIdentifier
-	Content     asn1.RawValue `asn1:"explicit,optional,tag:0"`
-}
-
-// encapsulatedContentInfo mirrors contentInfo but is used inside SignedData,
-// where content is always absent for a certs-only structure.
-type encapsulatedContentInfo struct {
-	ContentType asn1.ObjectIdentifier
-	Content     asn1.RawValue `asn1:"explicit,optional,tag:0"`
-}
-
-// signedData is RFC 2315's SignedData with certificates, crls and
-// signerInfos left empty/absent except for the certificates we carry.
-type signedData struct {
-	Version          int
-	DigestAlgorithms asn1.RawValue `asn1:"set"`
-	ContentInfo      encapsulatedContentInfo
-	Certificates     asn1.RawValue `asn1:"optional,tag:0"`
-	SignerInfos      asn1.RawValue `asn1:"set"`
-}
-
 // EncodeCertsOnly builds a DER-encoded degenerate PKCS#7 SignedData
 // ContentInfo containing certs, per RFC 7030 (certs-only response used by
-// /cacerts, /simpleenroll and /simplereenroll).
+// /cacerts, /simpleenroll and /simplereenroll):
+//
+//	ContentInfo ::= SEQUENCE {
+//	  contentType   id-signedData,
+//	  content       [0] EXPLICIT SignedData }
+//
+//	SignedData ::= SEQUENCE {
+//	  version           INTEGER (1),
+//	  digestAlgorithms  SET (empty),
+//	  contentInfo       SEQUENCE { contentType id-data },
+//	  certificates      [0] IMPLICIT SET OF Certificate,
+//	  signerInfos       SET (empty) }
 func EncodeCertsOnly(certs []*x509.Certificate) ([]byte, error) {
-	var certBytes []byte
 	for _, c := range certs {
 		if c == nil || len(c.Raw) == 0 {
 			return nil, errors.New("pkcs7: certificate has no raw DER encoding")
 		}
-		certBytes = append(certBytes, c.Raw...)
 	}
 
-	certificates := asn1.RawValue{
-		Class:      asn1.ClassContextSpecific,
-		Tag:        0,
-		IsCompound: true,
-		Bytes:      certBytes,
-	}
+	var b cryptobyte.Builder
+	b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) { // ContentInfo
+		b.AddASN1ObjectIdentifier(oidSignedData)
+		b.AddASN1(casn1.Tag(0).ContextSpecific().Constructed(), func(b *cryptobyte.Builder) { // content [0] EXPLICIT
+			b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) { // SignedData
+				b.AddASN1Int64(1)                                       // version
+				b.AddASN1(casn1.SET, func(b *cryptobyte.Builder) {})    // digestAlgorithms
+				b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) { // contentInfo
+					b.AddASN1ObjectIdentifier(oidData)
+				})
+				b.AddASN1(casn1.Tag(0).ContextSpecific().Constructed(), func(b *cryptobyte.Builder) { // certificates [0] IMPLICIT
+					for _, c := range certs {
+						b.AddBytes(c.Raw)
+					}
+				})
+				b.AddASN1(casn1.SET, func(b *cryptobyte.Builder) {}) // signerInfos
+			})
+		})
+	})
 
-	emptySet := asn1.RawValue{Class: asn1.ClassUniversal, Tag: asn1.TagSet, IsCompound: true}
-
-	sd := signedData{
-		Version:          1,
-		DigestAlgorithms: emptySet,
-		ContentInfo:      encapsulatedContentInfo{ContentType: oidData},
-		Certificates:     certificates,
-		SignerInfos:      emptySet,
-	}
-
-	sdBytes, err := asn1.Marshal(sd)
+	der, err := b.Bytes()
 	if err != nil {
-		return nil, fmt.Errorf("pkcs7: marshal signedData: %w", err)
-	}
-
-	ci := contentInfo{
-		ContentType: oidSignedData,
-		Content: asn1.RawValue{
-			Class:      asn1.ClassContextSpecific,
-			Tag:        0,
-			IsCompound: true,
-			Bytes:      sdBytes,
-		},
-	}
-
-	der, err := asn1.Marshal(ci)
-	if err != nil {
-		return nil, fmt.Errorf("pkcs7: marshal contentInfo: %w", err)
+		return nil, fmt.Errorf("pkcs7: marshal: %w", err)
 	}
 	return der, nil
 }
@@ -95,45 +79,69 @@ func EncodeCertsOnly(certs []*x509.Certificate) ([]byte, error) {
 // DecodeCertsOnly parses a DER-encoded degenerate PKCS#7 SignedData
 // ContentInfo and returns the embedded certificates.
 func DecodeCertsOnly(der []byte) ([]*x509.Certificate, error) {
-	var ci contentInfo
-	rest, err := asn1.Unmarshal(der, &ci)
-	if err != nil {
-		return nil, fmt.Errorf("pkcs7: unmarshal contentInfo: %w", err)
-	}
-	if len(rest) != 0 {
-		return nil, errors.New("pkcs7: trailing data after contentInfo")
-	}
-	if !ci.ContentType.Equal(oidSignedData) {
-		return nil, fmt.Errorf("pkcs7: unexpected content type %v", ci.ContentType)
+	input := cryptobyte.String(der)
+
+	var contentInfo cryptobyte.String
+	if !input.ReadASN1(&contentInfo, casn1.SEQUENCE) || !input.Empty() {
+		return nil, errors.New("pkcs7: invalid contentInfo")
 	}
 
-	var sd signedData
-	if _, err := asn1.Unmarshal(ci.Content.Bytes, &sd); err != nil {
-		return nil, fmt.Errorf("pkcs7: unmarshal signedData: %w", err)
+	var contentType asn1.ObjectIdentifier
+	if !contentInfo.ReadASN1ObjectIdentifier(&contentType) {
+		return nil, errors.New("pkcs7: invalid contentType")
+	}
+	if !contentType.Equal(oidSignedData) {
+		return nil, fmt.Errorf("pkcs7: unexpected content type %v", contentType)
 	}
 
-	if sd.Certificates.Tag != 0 || sd.Certificates.Class != asn1.ClassContextSpecific {
+	var explicitContent cryptobyte.String
+	if !contentInfo.ReadASN1(&explicitContent, casn1.Tag(0).ContextSpecific().Constructed()) {
+		return nil, errors.New("pkcs7: missing content")
+	}
+
+	var signedData cryptobyte.String
+	if !explicitContent.ReadASN1(&signedData, casn1.SEQUENCE) {
+		return nil, errors.New("pkcs7: invalid signedData")
+	}
+
+	var version int64
+	if !signedData.ReadASN1Int64WithTag(&version, casn1.INTEGER) {
+		return nil, errors.New("pkcs7: invalid version")
+	}
+
+	var digestAlgorithms cryptobyte.String
+	if !signedData.ReadASN1(&digestAlgorithms, casn1.SET) {
+		return nil, errors.New("pkcs7: invalid digestAlgorithms")
+	}
+
+	var encapContentInfo cryptobyte.String
+	if !signedData.ReadASN1(&encapContentInfo, casn1.SEQUENCE) {
+		return nil, errors.New("pkcs7: invalid contentInfo")
+	}
+
+	var certificates cryptobyte.String
+	var hasCertificates bool
+	if !signedData.ReadOptionalASN1(&certificates, &hasCertificates, casn1.Tag(0).ContextSpecific().Constructed()) {
+		return nil, errors.New("pkcs7: invalid certificates field")
+	}
+	if !hasCertificates {
 		return nil, errors.New("pkcs7: no certificates field present")
 	}
 
 	var certs []*x509.Certificate
-	remaining := sd.Certificates.Bytes
-	for len(remaining) > 0 {
-		// Each certificate in the set is self-length-delimited DER; find
-		// where it ends via a raw ASN.1 unmarshal, then parse exactly that
-		// slice so trailing siblings in remaining don't confuse the parser.
-		var raw asn1.RawValue
-		rest, err := asn1.Unmarshal(remaining, &raw)
-		if err != nil {
-			return nil, fmt.Errorf("pkcs7: parse embedded certificate: %w", err)
+	for !certificates.Empty() {
+		// Each certificate is self-length-delimited DER; ReadASN1Element
+		// reads one complete TLV (its own tag+length+content) so trailing
+		// siblings in certificates don't confuse the parser.
+		var certElement cryptobyte.String
+		if !certificates.ReadASN1Element(&certElement, casn1.SEQUENCE) {
+			return nil, errors.New("pkcs7: parse embedded certificate: malformed element")
 		}
-		certLen := len(remaining) - len(rest)
-		cert, err := x509.ParseCertificate(remaining[:certLen])
+		cert, err := x509.ParseCertificate(certElement)
 		if err != nil {
 			return nil, fmt.Errorf("pkcs7: parse embedded certificate: %w", err)
 		}
 		certs = append(certs, cert)
-		remaining = rest
 	}
 
 	return certs, nil

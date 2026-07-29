@@ -61,12 +61,17 @@ internal/config/        JSON config loading + validation
   exact CommonName match plus an identical SAN set between the CSR and the
   authenticated client certificate. Not a general policy engine — mismatches are
   rejected outright (403), not partially honored.
-- **Avoid third-party dependencies where the stdlib covers it.** `go.mod` currently
-  has no external dependencies; this was a deliberate choice (see the PKCS#7
-  encoder), not an oversight. If a task seems to need one, flag it rather than
-  adding it silently.
-- **`/fullcmc`, `/serverkeygen`, `/csrattrs` are out of scope for v1** — not routed,
-  404 by default. Fine to add later behind the existing interfaces if asked.
+- **Avoid third-party dependencies where the stdlib covers it.** The one exception is
+  `golang.org/x/crypto/cryptobyte` (used in `internal/pkcs7` and `internal/csrattrs`
+  to build/parse ASN.1 instead of hand-rolled `encoding/asn1.RawValue` tag/length
+  arithmetic) — Go-team-maintained infrastructure purpose-built for exactly this,
+  and what `crypto/x509` itself uses internally. This is a narrow, deliberate
+  exception, not a general relaxation of the no-dependencies stance. If a task
+  seems to need a different third-party dependency, flag it rather than adding it
+  silently.
+- **`/fullcmc` and `/serverkeygen` are out of scope for v1** — not routed, 404 by
+  default. Fine to add later behind the existing interfaces if asked. (`/csrattrs`
+  *is* implemented — see `internal/csrattrs`.)
 
 ## Git flow
 

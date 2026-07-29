@@ -4,13 +4,18 @@
 // attributes" mechanism and RFC 9908's CertificationRequestInfoTemplate
 // mechanism, encoded together in a single response.
 //
-// Every structure here is built by hand-assembling already-DER-encoded
-// child values via three small primitives (sequence, set, implicitTag)
-// rather than relying on encoding/asn1's struct-tag-driven OPTIONAL/tag
-// handling, which proved easy to get subtly wrong for explicit/implicit
-// context tags during development of internal/pkcs7. This trades a bit of
-// verbosity for encodings whose shape is fully explicit and easy to verify
-// byte-for-byte against the RFC's own worked examples.
+// Structures are built with golang.org/x/crypto/cryptobyte rather than
+// encoding/asn1's struct-tag-driven marshaling: the nesting of
+// Builder.AddASN1 calls mirrors the ASN.1 module text directly (an
+// EXPLICIT tag is a nested AddASN1 call; an IMPLICIT tag is a context tag
+// used in place of the universal one), which is easier to verify against
+// the RFC by inspection than a struct-tag encoding of the same structure —
+// see internal/pkcs7 for the same rationale in more detail. The one
+// exception is marshalExtensions, which builds a plain RFC 5280 Extensions
+// SEQUENCE via crypto/x509/pkix.Extension + encoding/asn1.Marshal: that was
+// never hand-rolled tag arithmetic (it's the same reflection-based struct
+// marshaling crypto/x509 itself uses for real certificate extensions), so
+// it isn't part of what this migration addresses.
 package csrattrs
 
 import (
@@ -21,6 +26,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"golang.org/x/crypto/cryptobyte"
+	casn1 "golang.org/x/crypto/cryptobyte/asn1"
 )
 
 // OIDs defined by PKCS#9 (RFC 2985) and RFC 9908 Appendix A.
@@ -127,6 +135,14 @@ func (o Options) Validate() error {
 	return nil
 }
 
+func isEmpty(opts Options) bool {
+	return !opts.ChallengePassword &&
+		opts.KeyAlgorithm == nil &&
+		len(opts.RequiredExtensions) == 0 &&
+		len(opts.ExtraOIDs) == 0 &&
+		opts.Template == nil
+}
+
 // Encode returns the DER-encoded CsrAttrs SEQUENCE for opts, or (nil, nil)
 // if opts is entirely empty — callers should respond with HTTP 204 in that
 // case rather than an empty-but-present SEQUENCE (RFC 7030 §4.5.2 treats
@@ -135,82 +151,36 @@ func Encode(opts Options) ([]byte, error) {
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
-
-	var items [][]byte
-
-	if opts.ChallengePassword {
-		d, err := marshalOIDItem(oidChallengePassword)
-		if err != nil {
-			return nil, fmt.Errorf("csrattrs: challenge_password: %w", err)
-		}
-		items = append(items, d)
-	}
-
-	if opts.KeyAlgorithm != nil {
-		d, err := marshalKeyAlgorithmAttribute(*opts.KeyAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("csrattrs: key_algorithm: %w", err)
-		}
-		items = append(items, d)
-	}
-
-	if len(opts.RequiredExtensions) > 0 {
-		d, err := marshalExtensionReqAttribute(opts.RequiredExtensions)
-		if err != nil {
-			return nil, fmt.Errorf("csrattrs: required_extensions: %w", err)
-		}
-		items = append(items, d)
-	}
-
-	for i, oidStr := range opts.ExtraOIDs {
-		d, err := marshalOIDItem(oidStr)
-		if err != nil {
-			return nil, fmt.Errorf("csrattrs: extra_oids[%d]: %w", i, err)
-		}
-		items = append(items, d)
-	}
-
-	if opts.Template != nil {
-		templateDER, err := buildTemplate(*opts.Template)
-		if err != nil {
-			return nil, fmt.Errorf("csrattrs: template: %w", err)
-		}
-		d, err := marshalAttribute(oidCertificationRequestInfoTemplate, templateDER)
-		if err != nil {
-			return nil, fmt.Errorf("csrattrs: template: %w", err)
-		}
-		items = append(items, d)
-	}
-
-	if len(items) == 0 {
+	if isEmpty(opts) {
 		return nil, nil
 	}
-	return sequence(items...)
-}
 
-// --- ASN.1 primitives ---
-//
-// Each wraps already-DER-encoded child values in a universal SEQUENCE/SET,
-// or overrides a compound value's tag for an IMPLICIT context tag.
+	var b cryptobyte.Builder
+	b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) { // CsrAttrs
+		if opts.ChallengePassword {
+			addOID(b, oidChallengePassword)
+		}
+		if opts.KeyAlgorithm != nil {
+			addKeyAlgorithmAttribute(b, *opts.KeyAlgorithm)
+		}
+		if len(opts.RequiredExtensions) > 0 {
+			addExtensionReqAttribute(b, opts.RequiredExtensions)
+		}
+		for _, oidStr := range opts.ExtraOIDs {
+			addOID(b, oidStr)
+		}
+		if opts.Template != nil {
+			addAttribute(b, oidCertificationRequestInfoTemplate, func(b *cryptobyte.Builder) {
+				addTemplate(b, *opts.Template)
+			})
+		}
+	})
 
-func sequence(parts ...[]byte) ([]byte, error) {
-	return wrap(asn1.ClassUniversal, asn1.TagSequence, parts)
-}
-
-func set(parts ...[]byte) ([]byte, error) {
-	return wrap(asn1.ClassUniversal, asn1.TagSet, parts)
-}
-
-func implicitTag(class, tag int, content []byte) ([]byte, error) {
-	return asn1.Marshal(asn1.RawValue{Class: class, Tag: tag, IsCompound: true, Bytes: content})
-}
-
-func wrap(class, tag int, parts [][]byte) ([]byte, error) {
-	var content []byte
-	for _, p := range parts {
-		content = append(content, p...)
+	der, err := b.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("csrattrs: %w", err)
 	}
-	return asn1.Marshal(asn1.RawValue{Class: class, Tag: tag, IsCompound: true, Bytes: content})
+	return der, nil
 }
 
 func parseOID(dotted string) (asn1.ObjectIdentifier, error) {
@@ -226,56 +196,49 @@ func parseOID(dotted string) (asn1.ObjectIdentifier, error) {
 	return oid, nil
 }
 
-func marshalOID(dotted string) ([]byte, error) {
+// addOID writes an OBJECT IDENTIFIER, either as a bare AttrOrOID "oid"
+// choice at the top level, or as the "type" field of an Attribute. Invalid
+// OID strings are reported through b (via SetError) rather than returned
+// directly, since this is called from deep inside nested AddASN1 closures;
+// the error ultimately surfaces from the top-level Builder.Bytes() call.
+func addOID(b *cryptobyte.Builder, dotted string) {
 	oid, err := parseOID(dotted)
 	if err != nil {
-		return nil, err
+		b.SetError(err)
+		return
 	}
-	return asn1.Marshal(oid)
+	b.AddASN1ObjectIdentifier(oid)
 }
 
-// marshalOIDItem builds a bare-OID AttrOrOID entry (the "oid" CHOICE
-// alternative): an untagged OBJECT IDENTIFIER, exactly as it appears at
-// the top level of the CsrAttrs SEQUENCE.
-func marshalOIDItem(dotted string) ([]byte, error) {
-	return marshalOID(dotted)
+// addAttribute builds an Attribute { type OID, values SET OF <value> }
+// (the "attribute" CHOICE alternative). addValue writes the single
+// values-SET member; nil means an empty SET (algorithm required, no
+// further constraint — see addKeyAlgorithmAttribute).
+func addAttribute(b *cryptobyte.Builder, oidStr string, addValue func(b *cryptobyte.Builder)) {
+	b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) {
+		addOID(b, oidStr)
+		b.AddASN1(casn1.SET, func(b *cryptobyte.Builder) {
+			if addValue != nil {
+				addValue(b)
+			}
+		})
+	})
 }
 
-// marshalAttribute builds an Attribute { type OID, values SET OF <valueDER> }
-// (the "attribute" CHOICE alternative).
-func marshalAttribute(oidStr string, valueDER ...[]byte) ([]byte, error) {
-	oidDER, err := marshalOID(oidStr)
-	if err != nil {
-		return nil, err
-	}
-	valuesDER, err := set(valueDER...)
-	if err != nil {
-		return nil, err
-	}
-	return sequence(oidDER, valuesDER)
-}
-
-func marshalKeyAlgorithmAttribute(ka KeyAlgorithm) ([]byte, error) {
-	var valueDER []byte
-	var err error
+func addKeyAlgorithmAttribute(b *cryptobyte.Builder, ka KeyAlgorithm) {
 	switch {
 	case ka.CurveOID != "":
-		valueDER, err = marshalOID(ka.CurveOID)
+		addAttribute(b, ka.OID, func(b *cryptobyte.Builder) { addOID(b, ka.CurveOID) })
 	case ka.RSAModulusBits != 0:
-		valueDER, err = asn1.Marshal(ka.RSAModulusBits)
+		addAttribute(b, ka.OID, func(b *cryptobyte.Builder) { b.AddASN1Int64(int64(ka.RSAModulusBits)) })
+	default:
+		addAttribute(b, ka.OID, nil)
 	}
-	if err != nil {
-		return nil, err
-	}
-	if valueDER != nil {
-		return marshalAttribute(ka.OID, valueDER)
-	}
-	return marshalAttribute(ka.OID) // empty values SET: algorithm required, no further constraint
 }
 
 // marshalExtensions builds a plain RFC 5280 Extensions SEQUENCE (every
 // value mandatory), reusing crypto/x509/pkix.Extension's existing
-// encoding/asn1 support rather than reimplementing it.
+// encoding/asn1 support rather than reimplementing it (see package doc).
 func marshalExtensions(exts []Extension) ([]byte, error) {
 	pkixExts := make([]pkix.Extension, len(exts))
 	for i, e := range exts {
@@ -292,61 +255,46 @@ func marshalExtensions(exts []Extension) ([]byte, error) {
 	return asn1.Marshal(pkixExts)
 }
 
-func marshalExtensionReqAttribute(exts []Extension) ([]byte, error) {
+func addExtensionReqAttribute(b *cryptobyte.Builder, exts []Extension) {
 	extsDER, err := marshalExtensions(exts)
 	if err != nil {
-		return nil, err
+		b.SetError(fmt.Errorf("required_extensions: %w", err))
+		return
 	}
-	return marshalAttribute(oidExtensionReq, extsDER)
+	addAttribute(b, oidExtensionReq, func(b *cryptobyte.Builder) { b.AddBytes(extsDER) })
 }
 
-// marshalExtensionTemplate builds one ExtensionTemplate SEQUENCE, omitting
+// addExtensionTemplate writes one ExtensionTemplate SEQUENCE, omitting
 // Critical when false (DEFAULT FALSE) and omitting the extnValue OCTET
 // STRING entirely when ValueHex is nil.
-func marshalExtensionTemplate(e TemplateExtension) ([]byte, error) {
-	oidDER, err := marshalOID(e.OID)
-	if err != nil {
-		return nil, err
-	}
-	parts := [][]byte{oidDER}
-	if e.Critical {
-		critDER, err := asn1.Marshal(true)
-		if err != nil {
-			return nil, err
+func addExtensionTemplate(b *cryptobyte.Builder, e TemplateExtension) {
+	b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) {
+		addOID(b, e.OID)
+		if e.Critical {
+			b.AddASN1Boolean(true)
 		}
-		parts = append(parts, critDER)
-	}
-	if e.ValueHex != nil {
-		value, err := hex.DecodeString(*e.ValueHex)
-		if err != nil {
-			return nil, fmt.Errorf("invalid value_hex: %w", err)
+		if e.ValueHex != nil {
+			value, err := hex.DecodeString(*e.ValueHex)
+			if err != nil {
+				b.SetError(fmt.Errorf("invalid value_hex: %w", err))
+				return
+			}
+			b.AddASN1OctetString(value)
 		}
-		valDER, err := asn1.Marshal(value)
-		if err != nil {
-			return nil, err
-		}
-		parts = append(parts, valDER)
-	}
-	return sequence(parts...)
+	})
 }
 
-func marshalExtensionReqTemplateAttribute(exts []TemplateExtension) ([]byte, error) {
-	var extDERs [][]byte
-	for i, e := range exts {
-		d, err := marshalExtensionTemplate(e)
-		if err != nil {
-			return nil, fmt.Errorf("extension %d: %w", i, err)
-		}
-		extDERs = append(extDERs, d)
-	}
-	extsSeqDER, err := sequence(extDERs...)
-	if err != nil {
-		return nil, err
-	}
-	return marshalAttribute(oidExtensionReqTemplate, extsSeqDER)
+func addExtensionReqTemplateAttribute(b *cryptobyte.Builder, exts []TemplateExtension) {
+	addAttribute(b, oidExtensionReqTemplate, func(b *cryptobyte.Builder) {
+		b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) { // ExtensionTemplates
+			for _, e := range exts {
+				addExtensionTemplate(b, e)
+			}
+		})
+	})
 }
 
-// buildTemplate builds a CertificationRequestInfoTemplate SEQUENCE:
+// addTemplate writes a CertificationRequestInfoTemplate SEQUENCE:
 //
 //	SEQUENCE {
 //	  version       INTEGER { v1(0) }
@@ -354,101 +302,64 @@ func marshalExtensionReqTemplateAttribute(exts []TemplateExtension) ([]byte, err
 //	  subjectPKInfo [0] SubjectPublicKeyInfoTemplate OPTIONAL
 //	  attributes    [1] Attributes{{ CRIAttributes }}  -- always present
 //	}
-func buildTemplate(t Template) ([]byte, error) {
-	versionDER, err := asn1.Marshal(0)
-	if err != nil {
-		return nil, err
-	}
-	parts := [][]byte{versionDER}
-
-	if len(t.Subject) > 0 {
-		subjectDER, err := buildSubjectTemplate(t.Subject)
-		if err != nil {
-			return nil, fmt.Errorf("subject: %w", err)
+func addTemplate(b *cryptobyte.Builder, t Template) {
+	b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) {
+		b.AddASN1Int64(0) // version
+		if len(t.Subject) > 0 {
+			addSubjectTemplate(b, t.Subject)
 		}
-		parts = append(parts, subjectDER)
-	}
-
-	if t.KeyType != nil {
-		pkInfoDER, err := buildSubjectPKInfoTemplate(*t.KeyType)
-		if err != nil {
-			return nil, fmt.Errorf("key type: %w", err)
+		if t.KeyType != nil {
+			addSubjectPKInfoTemplate(b, *t.KeyType)
 		}
-		parts = append(parts, pkInfoDER)
-	}
-
-	attrsDER, err := buildTemplateAttributes(t.Extensions)
-	if err != nil {
-		return nil, fmt.Errorf("extensions: %w", err)
-	}
-	parts = append(parts, attrsDER)
-
-	return sequence(parts...)
+		addTemplateAttributes(b, t.Extensions)
+	})
 }
 
-// buildSubjectTemplate builds the (untagged) NameTemplate field: a
-// SEQUENCE OF RelativeDistinguishedNameTemplate, one SET per RDN, each
-// containing a single SingleAttributeTemplate whose value is omitted when
-// the RDN's Value is nil.
-func buildSubjectTemplate(rdns []RDN) ([]byte, error) {
-	var rdnDERs [][]byte
-	for i, rdn := range rdns {
-		oidDER, err := marshalOID(rdn.OID)
-		if err != nil {
-			return nil, fmt.Errorf("rdn %d: %w", i, err)
+// addSubjectTemplate writes the (untagged) NameTemplate field: a SEQUENCE
+// OF RelativeDistinguishedNameTemplate, one SET per RDN, each containing a
+// single SingleAttributeTemplate whose value is omitted when the RDN's
+// Value is nil.
+func addSubjectTemplate(b *cryptobyte.Builder, rdns []RDN) {
+	b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) {
+		for _, rdn := range rdns {
+			b.AddASN1(casn1.SET, func(b *cryptobyte.Builder) {
+				b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) {
+					addOID(b, rdn.OID)
+					if rdn.Value != nil {
+						b.AddASN1(casn1.UTF8String, func(b *cryptobyte.Builder) {
+							b.AddBytes([]byte(*rdn.Value))
+						})
+					}
+				})
+			})
 		}
-		parts := [][]byte{oidDER}
-		if rdn.Value != nil {
-			valDER, err := asn1.MarshalWithParams(*rdn.Value, "utf8")
-			if err != nil {
-				return nil, fmt.Errorf("rdn %d: %w", i, err)
-			}
-			parts = append(parts, valDER)
-		}
-		attrDER, err := sequence(parts...)
-		if err != nil {
-			return nil, fmt.Errorf("rdn %d: %w", i, err)
-		}
-		rdnSetDER, err := set(attrDER)
-		if err != nil {
-			return nil, fmt.Errorf("rdn %d: %w", i, err)
-		}
-		rdnDERs = append(rdnDERs, rdnSetDER)
-	}
-	return sequence(rdnDERs...)
+	})
 }
 
-// buildSubjectPKInfoTemplate builds the [0] IMPLICIT SubjectPublicKeyInfoTemplate
+// addSubjectPKInfoTemplate writes the [0] IMPLICIT SubjectPublicKeyInfoTemplate
 // field, always omitting the OPTIONAL subjectPublicKey BIT STRING (v1 does
 // not support the RSA placeholder-key case; see Template.KeyType's doc).
-func buildSubjectPKInfoTemplate(ka KeyAlgorithm) ([]byte, error) {
-	algOIDDER, err := marshalOID(ka.OID)
-	if err != nil {
-		return nil, err
-	}
-	algParts := [][]byte{algOIDDER}
-	if ka.CurveOID != "" {
-		curveDER, err := marshalOID(ka.CurveOID)
-		if err != nil {
-			return nil, err
-		}
-		algParts = append(algParts, curveDER)
-	}
-	algIDDER, err := sequence(algParts...)
-	if err != nil {
-		return nil, err
-	}
-	return implicitTag(asn1.ClassContextSpecific, 0, algIDDER)
+func addSubjectPKInfoTemplate(b *cryptobyte.Builder, ka KeyAlgorithm) {
+	b.AddASN1(casn1.Tag(0).ContextSpecific().Constructed(), func(b *cryptobyte.Builder) {
+		b.AddASN1(casn1.SEQUENCE, func(b *cryptobyte.Builder) { // AlgorithmIdentifier
+			addOID(b, ka.OID)
+			if ka.CurveOID != "" {
+				addOID(b, ka.CurveOID)
+			}
+		})
+	})
 }
 
-// buildTemplateAttributes builds the [1] IMPLICIT attributes field: a SET
-// OF Attribute (empty when exts is empty), containing at most one
+// addTemplateAttributes writes the [1] IMPLICIT attributes field: a SET OF
+// Attribute (empty when exts is empty), containing at most one
 // extension-requirement attribute per the RFC 9908 §3.4 MUST rule: use
 // id-ExtensionReq when every extension's value is present, or
 // id-aa-extensionReqTemplate when any value is left for the client.
-func buildTemplateAttributes(exts []TemplateExtension) ([]byte, error) {
-	var content []byte
-	if len(exts) > 0 {
+func addTemplateAttributes(b *cryptobyte.Builder, exts []TemplateExtension) {
+	b.AddASN1(casn1.Tag(1).ContextSpecific().Constructed(), func(b *cryptobyte.Builder) {
+		if len(exts) == 0 {
+			return
+		}
 		allPresent := true
 		for _, e := range exts {
 			if e.ValueHex == nil {
@@ -456,22 +367,14 @@ func buildTemplateAttributes(exts []TemplateExtension) ([]byte, error) {
 				break
 			}
 		}
-
-		var attrDER []byte
-		var err error
 		if allPresent {
 			full := make([]Extension, len(exts))
 			for i, e := range exts {
 				full[i] = Extension{OID: e.OID, Critical: e.Critical, ValueHex: *e.ValueHex}
 			}
-			attrDER, err = marshalExtensionReqAttribute(full)
+			addExtensionReqAttribute(b, full)
 		} else {
-			attrDER, err = marshalExtensionReqTemplateAttribute(exts)
+			addExtensionReqTemplateAttribute(b, exts)
 		}
-		if err != nil {
-			return nil, err
-		}
-		content = attrDER
-	}
-	return implicitTag(asn1.ClassContextSpecific, 1, content)
+	})
 }
