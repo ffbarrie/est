@@ -1,0 +1,20 @@
+{
+  "listen_addr": "0.0.0.0:8443",
+  "server_cert_file": "/etc/estd/server.crt",
+  "server_key_file": "/etc/estd/server.key",
+  "client_ca_files": ["/etc/estd/client-trust-ca.crt"],
+
+  "ca_backend": "ejbca",
+  "ejbca_ca": {
+    "base_url": "https://ejbca.example.com:8443/ejbca/ejbca-rest-api/v1",
+    "client_cert_file": "/etc/estd/ejbca-client.crt",
+    "client_key_file": "/etc/estd/ejbca-client.key",
+    "ca_name": "ExampleCA",
+    "ca_subject_dn": "CN=Example CA,O=Example Org,C=SE",
+    "certificate_profile_name": "ENDUSER",
+    "end_entity_profile_name": "ExampleEEP"
+  },
+
+  "store_dir": "/var/lib/estd",
+  "cert_validity": "8760h"
+}

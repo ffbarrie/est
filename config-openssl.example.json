@@ -1,0 +1,15 @@
+{
+  "listen_addr": "0.0.0.0:8443",
+  "server_cert_file": "/etc/estd/server.crt",
+  "server_key_file": "/etc/estd/server.key",
+  "client_ca_files": ["/etc/estd/ca.crt"],
+
+  "ca_backend": "openssl",
+  "ca_cert_file": "/etc/estd/ca.crt",
+  "openssl_ca": {
+    "config_file": "/etc/estd/openssl-ca/openssl.cnf"
+  },
+
+  "store_dir": "/var/lib/estd",
+  "cert_validity": "8760h"
+}
