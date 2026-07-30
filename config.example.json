@@ -1,10 +1,13 @@
 {
   "listen_addr": "0.0.0.0:8443",
-  "server_cert_file": "/etc/est/server.crt",
-  "server_key_file": "/etc/est/server.key",
-  "client_ca_files": ["/etc/est/ca.crt"],
-  "ca_cert_file": "/etc/est/ca.crt",
-  "ca_key_file": "/etc/est/ca.key",
+  "server_cert_file": "/etc/estd/server.crt",
+  "server_key_file": "/etc/estd/server.key",
+  "client_ca_files": ["/etc/estd/ca.crt"],
+
+  "ca_backend": "local",
+  "ca_cert_file": "/etc/estd/ca.crt",
+  "ca_key_file": "/etc/estd/ca.key",
+
   "store_dir": "/var/lib/estd",
   "cert_validity": "8760h",
 

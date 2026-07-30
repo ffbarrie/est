@@ -1,8 +1,10 @@
 # est
 
 An [EST](https://www.rfc-editor.org/rfc/rfc7030) (Enrollment over Secure Transport) server, written in Go. It issues
-and renews X.509 certificates over mutual TLS. The CA backend is pluggable behind a small interface; the only
-implementation today is a local, in-process CA built on `crypto/x509` (no `openssl` CLI dependency).
+and renews X.509 certificates over mutual TLS. The CA backend is pluggable behind a small interface, selected at
+runtime by one config field (`ca_backend`) — no rebuild required to switch. Three implementations exist today: a
+local, in-process CA built on `crypto/x509`; one that shells out to a real `openssl ca`; and one that calls EJBCA's
+REST API. See [CA backends](#ca-backends) below.
 
 ## Status
 
@@ -12,8 +14,9 @@ implementation today is a local, in-process CA built on `crypto/x509` (no `opens
 - **Auth:** mutual TLS only, for every endpoint. `/cacerts` and `/csrattrs` accept an anonymous connection (no client
   certificate) per RFC 7030 — that's their bootstrap use case. `/simpleenroll` and `/simplereenroll` require a client
   certificate the server already trusts.
-- **CA backend:** local (`crypto/x509`-based) only, for now. A second backend (e.g. EJBCA) can be added as a sibling
-  package implementing the same `ca.CABackend` interface, with no changes to the HTTP layer.
+- **CA backend:** pluggable via `ca_backend` in config — `"local"` (`crypto/x509`-based, default), `"openssl"`
+  (shells out to `openssl ca`), or `"ejbca"` (EJBCA's REST API). See [CA backends](#ca-backends) below; a fourth
+  implementation would be just as easy to add behind the same `ca.CABackend` interface, with no HTTP-layer changes.
 - **Storage:** issued certificates and CSRs are written to local files (see `internal/store`) — a deliberate
   placeholder, expected to be swapped for something heavier later.
 
@@ -29,7 +32,8 @@ gofmt -l .   # should print nothing
 go vet ./...
 ```
 
-No external dependencies (`go.mod` has none) — this is deliberate, not an oversight; see `AGENTS.md`.
+One external dependency (`golang.org/x/crypto`, for ASN.1 construction) — a narrow, deliberate exception to an
+otherwise stdlib-only codebase, not an oversight; see `AGENTS.md`.
 
 ## Running it
 
@@ -38,7 +42,11 @@ go build -o estd ./cmd/estd
 ./estd -config config.json
 ```
 
-`config.json` is a JSON file — see [config.example.json](config.example.json) for a fully worked example, and the
+`config.json` is a JSON file. Three fully worked examples exist, one per CA backend — copy whichever matches, then
+edit the paths: [config.example.json](config.example.json) (`"local"`, the default),
+[config-openssl.example.json](config-openssl.example.json), [config-ejbca.example.json](config-ejbca.example.json).
+They share every field *except* the CA-backend-related ones (`ca_backend` and whichever of `ca_key_file`/
+`openssl_ca`/`ejbca_ca` that backend needs) — see the
 field reference below.
 
 ### Config fields
@@ -65,11 +73,13 @@ cert read locally, key never leaves the `openssl` subprocess), `"ejbca"` is full
 over HTTPS, nothing CA-related stored locally at all).
 
 - **`"local"`** (default) — signs in-process via `crypto/x509`, no external process. `ca_key_file` is required in
-  this mode; the server process holds the CA private key in memory.
+  this mode; the server process holds the CA private key in memory. See
+  [config.example.json](config.example.json) for a full example.
 - **`"openssl"`** — signs by shelling out to a real `openssl ca` command against an operator-provisioned OpenSSL CA
   directory (the classic `index.txt`/`serial`/`newcerts/` flat-file database). The server process **never reads or
   holds the CA private key** in this mode — key access is delegated entirely to the `openssl` subprocess, whose own
-  `openssl.cnf` points at it. Configure it with:
+  `openssl.cnf` points at it. See [config-openssl.example.json](config-openssl.example.json) for a full example;
+  the backend-specific part is:
   ```json
   "ca_backend": "openssl",
   "openssl_ca": {
@@ -80,7 +90,8 @@ over HTTPS, nothing CA-related stored locally at all).
   `copy_extensions = copy` + fixed `[est_extensions]` section combination that keeps `BasicConstraints`/`KeyUsage`/
   `ExtKeyUsage` server-controlled (never CSR-derived) while still copying a requested SAN through, the same
   guarantee `LocalCA` provides in Go code. `scripts/gen-dev-certs.sh` also generates a throwaway OpenSSL CA
-  directory (`openssl-ca/` + `config-openssl.json`) alongside its usual dev certs, for trying this backend locally.
+  directory (`openssl-ca/` + a runtime `config-openssl.json`, distinct from the committed
+  `config-openssl.example.json` above) alongside its usual dev certs, for trying this backend locally.
 
   **Not currently usable with the published Docker image**: the distroless base has no shell, package manager, or
   `openssl` binary at all (by design — see [Running via Docker](#running-via-docker)), so `ca_backend: "openssl"`
@@ -89,7 +100,8 @@ over HTTPS, nothing CA-related stored locally at all).
 - **`"ejbca"`** — signs via [EJBCA's REST API](https://docs.keyfactor.com/ejbca/latest/ejbca-rest-interface) over
   HTTPS, authenticating to EJBCA with a TLS client certificate (the same mechanism EJBCA's own Admin GUI uses,
   mapped to an administrator role with enrollment privileges). Neither `ca_cert_file` nor `ca_key_file` is read in
-  this mode — the CA certificate is fetched live from EJBCA too. Configure it with:
+  this mode — the CA certificate is fetched live from EJBCA too. See
+  [config-ejbca.example.json](config-ejbca.example.json) for a full example; the backend-specific part is:
   ```json
   "ca_backend": "ejbca",
   "ejbca_ca": {
@@ -102,14 +114,31 @@ over HTTPS, nothing CA-related stored locally at all).
     "end_entity_profile_name": "ExampleEEP"
   }
   ```
+  `client_cert_file`/`client_key_file` are **estd's own credentials for authenticating to EJBCA** — not something
+  this repo can generate for you (unlike the other two backends' dev-cert tooling): obtain them from whoever
+  administers your EJBCA instance, issued with an administrator role authorized to enroll against the configured
+  CA/profiles. Similarly, `client_ca_files` (the trust anchor for *incoming* EST client mTLS) has no local CA file
+  to reuse under this backend, unlike `"local"`/`"openssl"` — it's a separate, operator-provided bundle, since
+  there's no reason it need be the same CA EJBCA issues from.
+
   Each enrollment generates a random, one-time username/password to satisfy EJBCA's end-entity model — **this
   assumes the configured End Entity Profile permits ad hoc/self-service enrollment with arbitrary credentials**,
   which is not universal across EJBCA deployments; check this against your own profile configuration.
 
-  **Verification caveat, stated plainly**: unlike the other two backends, this one was built and tested against a
-  mock server shaped like EJBCA's published OpenAPI spec, not a real EJBCA instance (none was available during
-  development). Treat it as a spec-conformant starting point, and validate it against your own deployment before
-  relying on it.
+  **Verification caveat, stated plainly**: this backend's mTLS-to-EJBCA design was tried against a real EJBCA
+  instance (EJBCA 9.3.7 Community, `keyfactor/ejbca-ce`) and did not work — not just tested against a mock server
+  shaped like EJBCA's published OpenAPI spec. With Protocol Configuration, CA trust, and the administrator role's
+  access rules all independently confirmed correct on that instance (verified via its own audit log), every REST
+  endpoint tried returned a normal response with no client certificate presented, but reset the connection
+  immediately after a fully successful TLS handshake as soon as *any* client certificate was presented — reproduced
+  across two client certificates from two different issuing CAs sharing one key, and across two different TLS
+  stacks (curl/LibreSSL and `openssl s_client`/OpenSSL), with no corresponding entry at all in EJBCA's own audit
+  log (the request never reached the application layer). That points to a broken or unsupported two-way-TLS
+  connector configuration in that specific container image, not to a bug in this backend's request logic. Treat
+  the mock-verified request/response handling as a correct, spec-conformant starting point, but validate the
+  mTLS-authentication path itself against your own deployment before relying on it — it may need an EJBCA
+  Enterprise instance, a differently configured connector, or (as one other project independently found against
+  the same EJBCA Community instance) an entirely different auth mechanism such as CMP with HMAC.
 
 `csr_attrs` supports two mechanisms, and both are documented in `config.example.json`:
 
