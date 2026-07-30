@@ -62,13 +62,29 @@ internal/config/        JSON config loading + validation
   easy to add the same way. A different storage backend would replace
   `internal/store`'s `FileStore` without touching `internal/ca` or `internal/estapi`.
   Don't hard-code assumptions that only one implementation of either will ever exist.
-- **`internal/ca/ejbca` has never been tested against a real EJBCA instance** — only
-  a mock server shaped like EJBCA's published OpenAPI spec (Keyfactor/ejbca-ce). This
-  is different from `internal/ca/openssl`, which is tested against the real `openssl`
-  binary. If you touch this package, keep that distinction honest in comments/docs
-  rather than implying it's been verified against the genuine product. It also
-  generates a random one-time username/password per enrollment — documented as an
-  assumption about the operator's EJBCA End Entity Profile allowing ad hoc
+- **`internal/ca/ejbca`'s mTLS-to-EJBCA design has been tried against a real EJBCA
+  instance (EJBCA 9.3.7 Community, `keyfactor/ejbca-ce`) and failed at the TLS
+  connector level** — not just tested against the mock server shaped like EJBCA's
+  published OpenAPI spec. With Protocol Configuration, CA trust, and administrator
+  role/access-rule bindings all independently confirmed correct (verified via the
+  instance's own audit log), every REST endpoint tested returns a clean response
+  with no client certificate presented, and the connection is reset immediately
+  after a fully successful TLS handshake as soon as *any* client certificate is
+  presented — reproduced with two different client certificates from two different
+  issuing CAs sharing one key, with two different TLS stacks (curl/LibreSSL and
+  `openssl s_client`/OpenSSL), with zero corresponding entry in EJBCA's own audit
+  log (meaning the request never reaches the EJBCA application layer at all). This
+  points at a broken or unsupported two-way-TLS connector configuration in that
+  container image, not at anything fixable via `internal/ca/ejbca`'s code or
+  config. It is consistent with a separate, independent finding recorded outside
+  this repo (a sibling project's ADR, working against the same EJBCA instance):
+  that project deliberately avoided client-certificate auth for EJBCA enrollment on
+  Community Edition, using CMP HMAC auth instead. If you touch this package, do not
+  claim it's been verified end-to-end against a real instance — only that the
+  mTLS-auth design was attempted and hit an infrastructure-level wall, distinct from
+  `internal/ca/openssl`, which *is* verified against the real `openssl` binary. It
+  also generates a random one-time username/password per enrollment — documented as
+  an assumption about the operator's EJBCA End Entity Profile allowing ad hoc
   credentials, not a universal guarantee.
 - **Certificate template fields that affect trust are always server-controlled,
   never taken from the CSR**: `BasicConstraints`/`IsCA`, `KeyUsage`, `ExtKeyUsage`.

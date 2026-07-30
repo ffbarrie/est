@@ -125,10 +125,20 @@ over HTTPS, nothing CA-related stored locally at all).
   assumes the configured End Entity Profile permits ad hoc/self-service enrollment with arbitrary credentials**,
   which is not universal across EJBCA deployments; check this against your own profile configuration.
 
-  **Verification caveat, stated plainly**: unlike the other two backends, this one was built and tested against a
-  mock server shaped like EJBCA's published OpenAPI spec, not a real EJBCA instance (none was available during
-  development). Treat it as a spec-conformant starting point, and validate it against your own deployment before
-  relying on it.
+  **Verification caveat, stated plainly**: this backend's mTLS-to-EJBCA design was tried against a real EJBCA
+  instance (EJBCA 9.3.7 Community, `keyfactor/ejbca-ce`) and did not work — not just tested against a mock server
+  shaped like EJBCA's published OpenAPI spec. With Protocol Configuration, CA trust, and the administrator role's
+  access rules all independently confirmed correct on that instance (verified via its own audit log), every REST
+  endpoint tried returned a normal response with no client certificate presented, but reset the connection
+  immediately after a fully successful TLS handshake as soon as *any* client certificate was presented — reproduced
+  across two client certificates from two different issuing CAs sharing one key, and across two different TLS
+  stacks (curl/LibreSSL and `openssl s_client`/OpenSSL), with no corresponding entry at all in EJBCA's own audit
+  log (the request never reached the application layer). That points to a broken or unsupported two-way-TLS
+  connector configuration in that specific container image, not to a bug in this backend's request logic. Treat
+  the mock-verified request/response handling as a correct, spec-conformant starting point, but validate the
+  mTLS-authentication path itself against your own deployment before relying on it — it may need an EJBCA
+  Enterprise instance, a differently configured connector, or (as one other project independently found against
+  the same EJBCA Community instance) an entirely different auth mechanism such as CMP with HMAC.
 
 `csr_attrs` supports two mechanisms, and both are documented in `config.example.json`:
 
